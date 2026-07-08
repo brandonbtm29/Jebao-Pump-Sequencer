@@ -1,0 +1,7 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# App Configs
+secrets.json
+jebao_config.json
