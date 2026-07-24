@@ -5,3 +5,4 @@ __pycache__/
 # App Configs
 secrets.json
 jebao_config.json
+crash_log.txt

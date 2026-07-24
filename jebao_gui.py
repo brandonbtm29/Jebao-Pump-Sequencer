@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QMessageBox, QFrame, QDoubleSpinBox, QListWidget,
     QListWidgetItem, QInputDialog, QSplitter, QTabWidget, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QDialog, QDialogButtonBox, QFormLayout, QStackedWidget
+    QDialog, QDialogButtonBox, QFormLayout, QStackedWidget, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QColor, QPalette, QStandardItemModel, QStandardItem
@@ -170,6 +170,7 @@ class ConfigManager:
         if did not in self.data["pumps"]:
             self.data["pumps"][did] = {
                 "volumes": [10.0, 10.0, 10.0, 10.0],
+                "units": ["Vol (mL)", "Vol (mL)", "Vol (mL)", "Vol (mL)"],
                 "calibration": [1.0, 1.0, 1.0, 1.0],
                 "tubing_id": [2.0, 2.0, 2.0, 2.0],
                 "tubing_od": [4.0, 4.0, 4.0, 4.0]
@@ -179,6 +180,8 @@ class ConfigManager:
         if "tubing_id" not in self.data["pumps"][did]:
             self.data["pumps"][did]["tubing_id"] = [2.0, 2.0, 2.0, 2.0]
             self.data["pumps"][did]["tubing_od"] = [4.0, 4.0, 4.0, 4.0]
+        if "units" not in self.data["pumps"][did]:
+            self.data["pumps"][did]["units"] = ["Vol (mL)", "Vol (mL)", "Vol (mL)", "Vol (mL)"]
             
         return self.data["pumps"][did]
 
@@ -297,6 +300,7 @@ class JebaoPumpGUI(QMainWindow):
         self._ch_paused = {1: False, 2: False, 3: False, 4: False}
         self._ch_cancelled = {1: False, 2: False, 3: False, 4: False}
         self._ch_resume_events = {1: asyncio.Event(), 2: asyncio.Event(), 3: asyncio.Event(), 4: asyncio.Event()}
+        self._ch_review_events = {1: None, 2: None, 3: None, 4: None}
         
         self.setup_ui()
         
@@ -351,6 +355,27 @@ class JebaoPumpGUI(QMainWindow):
         self.queue_list = QListWidget()
         self.queue_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         seq_sidebar_layout.addWidget(self.queue_list)
+        
+        # Pending Approvals Section
+        seq_sidebar_layout.addWidget(QLabel("<b>Pending Approvals</b>"))
+        
+        appr_grid = QGridLayout()
+        self.btn_approve_channels = []
+        for i in range(4):
+            btn = QPushButton(f"Approve CH {i+1}")
+            btn.setEnabled(False)
+            btn.setStyleSheet("background-color: #6C757D; color: white;")
+            btn.clicked.connect(lambda checked, ch=i+1: self.approve_channel(ch))
+            self.btn_approve_channels.append(btn)
+            appr_grid.addWidget(btn, i//2, i%2)
+            
+        seq_sidebar_layout.addLayout(appr_grid)
+        
+        self.btn_approve_all = QPushButton("Approve All")
+        self.btn_approve_all.setEnabled(False)
+        self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
+        self.btn_approve_all.clicked.connect(self.approve_all)
+        seq_sidebar_layout.addWidget(self.btn_approve_all)
         
         top_splitter.addWidget(seq_sidebar)
         
@@ -437,7 +462,6 @@ class JebaoPumpGUI(QMainWindow):
         gui_handler.setFormatter(logging.Formatter('%(message)s'))
         logger.addHandler(gui_handler)
         
-        self.update_center_panel_state(enabled=False)
         self.refresh_saved_sequences_ui()
 
     def open_settings(self):
@@ -478,10 +502,28 @@ class JebaoPumpGUI(QMainWindow):
             asyncio.create_task(self.send_cloud_command(self.current_pump_did, {f"channe{ch}": False}))
         logger.info(f"[CH{ch}] Cancellation requested by user.")
 
+    def approve_channel(self, ch):
+        if self._ch_review_events.get(ch):
+            self._ch_review_events[ch].set()
+            self._ch_review_events[ch] = None
+            self.btn_approve_channels[ch-1].setEnabled(False)
+            self.btn_approve_channels[ch-1].setStyleSheet("background-color: #6C757D; color: white;")
+        
+        # Check if any other channels are still waiting
+        if not any(self._ch_review_events.values()):
+            self.btn_approve_all.setEnabled(False)
+            self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
+
+    def approve_all(self):
+        for ch in range(1, 5):
+            self.approve_channel(ch)
+
     def build_manual_tab(self):
         widget = QWidget()
         layout = QGridLayout(widget)
         self.channel_spins = []
+        self.channel_units = []
+        
         for i in range(4):
             ch_num = i + 1
             frame = QFrame()
@@ -493,9 +535,14 @@ class JebaoPumpGUI(QMainWindow):
             flayout.addWidget(header)
             
             vol_layout = QHBoxLayout()
-            vol_layout.addWidget(QLabel("Vol (mL):"))
+            unit_combo = QComboBox()
+            unit_combo.addItems(["Vol (mL)", "Time (s)"])
+            unit_combo.currentIndexChanged.connect(self.save_current_pump_state)
+            self.channel_units.append(unit_combo)
+            vol_layout.addWidget(unit_combo)
+            
             spin = QDoubleSpinBox()
-            spin.setRange(0.1, 999.9)
+            spin.setRange(0.1, 9999.9)
             spin.setValue(10.0)
             spin.valueChanged.connect(self.save_current_pump_state)
             self.channel_spins.append(spin)
@@ -504,7 +551,7 @@ class JebaoPumpGUI(QMainWindow):
             
             btn_dose = QPushButton(f"Dose CH {ch_num}")
             btn_dose.setStyleSheet("background-color: #0078D7; color: white; padding: 5px;")
-            btn_dose.clicked.connect(lambda checked, ch=ch_num, s=spin: self.trigger_dose(self.current_pump_did, ch, s.value()))
+            btn_dose.clicked.connect(lambda checked, ch=ch_num, s=spin, u=unit_combo: self.trigger_dose(self.current_pump_did, ch, s.value(), u.currentText()))
             flayout.addWidget(btn_dose)
             
             btn_pause = QPushButton("Pause")
@@ -517,7 +564,10 @@ class JebaoPumpGUI(QMainWindow):
             btn_cancel.clicked.connect(lambda checked, ch=ch_num: self.cancel_channel_dose(ch))
             flayout.addWidget(btn_cancel)
             
-            layout.addWidget(frame, 0, i)
+            row = i // 2
+            col = i % 2
+            layout.addWidget(frame, row, col)
+            
         return widget
 
     def build_calibration_tab(self):
@@ -527,62 +577,151 @@ class JebaoPumpGUI(QMainWindow):
         info = QLabel("<b>Calibration Procedure:</b><br>"
                       "Because the MD-4.4 dosing pumps operate at a fixed physical speed, flow rate cannot be altered.<br>"
                       "To ensure accurate volume dosing, you must calibrate the flow rate (mL/min) for each channel.<br>"
-                      "1. Select a channel.<br>2. Click 'Run 60 Seconds' into a graduated cylinder or scale.<br>"
-                      "3. Enter the measured volume and click Save.")
+                      "1. Select channels below.<br>2. Click 'Run Selected Channels for 60s' into graduated cylinders or scales.<br>"
+                      "3. Enter the measured volumes and tubing sizes, then click Save.")
         layout.addWidget(info)
         
         ctrl_layout = QHBoxLayout()
-        ctrl_layout.addWidget(QLabel("Pump:"))
+        ctrl_layout.addWidget(QLabel("Select Pump:"))
         self.cal_pump_combo = QComboBox()
         self.cal_pump_combo.currentIndexChanged.connect(self.update_cal_labels)
         ctrl_layout.addWidget(self.cal_pump_combo)
-        
-        ctrl_layout.addWidget(QLabel("Channel:"))
-        self.cal_combo = QComboBox()
-        self.cal_combo.addItems(["Channel 1", "Channel 2", "Channel 3", "Channel 4"])
-        self.cal_combo.currentIndexChanged.connect(self.update_cal_labels)
-        ctrl_layout.addWidget(self.cal_combo)
-        
-        self.btn_cal_run = QPushButton("Run 60 Seconds")
-        self.btn_cal_run.setStyleSheet("background-color: #28A745; color: white; font-weight: bold;")
-        self.btn_cal_run.clicked.connect(self.run_calibration)
-        ctrl_layout.addWidget(self.btn_cal_run)
+        ctrl_layout.addStretch()
         layout.addLayout(ctrl_layout)
         
-        res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("Measured Volume (mL):"))
-        self.cal_spin = QDoubleSpinBox()
-        self.cal_spin.setRange(0.1, 999.9)
-        self.cal_spin.setValue(60.0)
-        res_layout.addWidget(self.cal_spin)
+        grid = QGridLayout()
+        self.cal_checkboxes = []
+        self.cal_vol_spins = []
+        self.cal_id_spins = []
+        self.cal_od_spins = []
+        self.cal_rate_labels = []
+        
+        for i in range(4):
+            ch_num = i + 1
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
+            flayout = QVBoxLayout(frame)
+            
+            cb = QCheckBox(f"Channel {ch_num}")
+            cb.setStyleSheet("font-weight: bold;")
+            self.cal_checkboxes.append(cb)
+            flayout.addWidget(cb)
+            
+            lbl_rate = QLabel("Rate: ? mL/min")
+            lbl_rate.setStyleSheet("color: #E2E2E2; font-style: italic;")
+            self.cal_rate_labels.append(lbl_rate)
+            flayout.addWidget(lbl_rate)
+            
+            # Tubing inputs
+            h1 = QHBoxLayout()
+            h1.addWidget(QLabel("ID (mm):"))
+            id_spin = QDoubleSpinBox()
+            id_spin.setRange(0.1, 20.0)
+            id_spin.setValue(2.0)
+            self.cal_id_spins.append(id_spin)
+            h1.addWidget(id_spin)
+            flayout.addLayout(h1)
+            
+            h2 = QHBoxLayout()
+            h2.addWidget(QLabel("OD (mm):"))
+            od_spin = QDoubleSpinBox()
+            od_spin.setRange(0.1, 20.0)
+            od_spin.setValue(4.0)
+            self.cal_od_spins.append(od_spin)
+            h2.addWidget(od_spin)
+            flayout.addLayout(h2)
+            
+            # Volume input
+            h3 = QHBoxLayout()
+            h3.addWidget(QLabel("Meas Vol:"))
+            vol_spin = QDoubleSpinBox()
+            vol_spin.setRange(0.1, 999.9)
+            vol_spin.setValue(60.0)
+            self.cal_vol_spins.append(vol_spin)
+            h3.addWidget(vol_spin)
+            flayout.addLayout(h3)
+            
+            grid.addWidget(frame, 0, i)
+            
+        layout.addLayout(grid)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_cal_run = QPushButton("Run Selected Channels for 60s")
+        self.btn_cal_run.setStyleSheet("background-color: #28A745; color: white; font-weight: bold;")
+        self.btn_cal_run.clicked.connect(self.run_calibration)
+        btn_layout.addWidget(self.btn_cal_run)
         
         self.btn_cal_save = QPushButton("Save Calibration")
         self.btn_cal_save.clicked.connect(self.save_calibration)
-        res_layout.addWidget(self.btn_cal_save)
-        layout.addLayout(res_layout)
+        btn_layout.addWidget(self.btn_cal_save)
         
-        self.lbl_cal_current = QLabel("Current Rate: ? mL/min")
-        self.lbl_cal_current.setStyleSheet("color: #E2E2E2; font-style: italic;")
-        layout.addWidget(self.lbl_cal_current)
-        
-        # Tubing Dimensions
-        tube_layout = QHBoxLayout()
-        tube_layout.addWidget(QLabel("Tubing ID (mm):"))
-        self.cal_id_spin = QDoubleSpinBox()
-        self.cal_id_spin.setRange(0.1, 20.0)
-        self.cal_id_spin.setValue(2.0)
-        tube_layout.addWidget(self.cal_id_spin)
-        
-        tube_layout.addWidget(QLabel("Tubing OD (mm):"))
-        self.cal_od_spin = QDoubleSpinBox()
-        self.cal_od_spin.setRange(0.1, 20.0)
-        self.cal_od_spin.setValue(4.0)
-        tube_layout.addWidget(self.cal_od_spin)
-        
-        layout.addLayout(tube_layout)
-        
+        layout.addLayout(btn_layout)
         layout.addStretch()
         return widget
+
+    def update_cal_labels(self):
+        did = self.cal_pump_combo.currentData()
+        if not did:
+            for lbl in self.cal_rate_labels: lbl.setText("Rate: ? mL/min")
+            return
+            
+        p = self.config.get_pump(did)
+        for i in range(4):
+            rate = p["calibration"][i]
+            self.cal_rate_labels[i].setText(f"Rate: {rate:.3f} mL/min")
+            self.cal_id_spins[i].setValue(p["tubing_id"][i])
+            self.cal_od_spins[i].setValue(p["tubing_od"][i])
+
+    def run_calibration(self):
+        did = self.cal_pump_combo.currentData()
+        if not did: return
+        
+        channels_to_run = [i for i, cb in enumerate(self.cal_checkboxes) if cb.isChecked()]
+        if not channels_to_run:
+            QMessageBox.warning(self, "No Channels", "Please select at least one channel to calibrate.")
+            return
+            
+        self.btn_cal_run.setEnabled(False)
+        asyncio.create_task(self._async_calibration_run(did, channels_to_run))
+        
+    async def _async_calibration_run(self, did, channels):
+        cmds = {f"channe{ch+1}": True for ch in channels}
+        off_cmds = {f"channe{ch+1}": False for ch in channels}
+        ch_str = ", ".join([str(ch+1) for ch in channels])
+        try:
+            await self.send_cloud_command(did, cmds)
+            logger.info(f"Calibration: Motors ON {ch_str}. Waiting 60 seconds...")
+            await asyncio.sleep(60.0)
+            await self.send_cloud_command(did, off_cmds)
+            logger.info("Motors OFF. Please enter the measured volumes and click Save.")
+        except Exception as e:
+            logger.error(f"Calibration run failed: {e}")
+        finally:
+            self.btn_cal_run.setEnabled(True)
+
+    def save_calibration(self):
+        did = self.cal_pump_combo.currentData()
+        if not did: return
+        
+        p = self.config.get_pump(did)
+        saved_any = False
+        
+        for i, cb in enumerate(self.cal_checkboxes):
+            if cb.isChecked():
+                vol = self.cal_vol_spins[i].value()
+                rate = vol  # 60s run means vol == mL/min
+                p["calibration"][i] = rate
+                p["tubing_id"][i] = self.cal_id_spins[i].value()
+                p["tubing_od"][i] = self.cal_od_spins[i].value()
+                saved_any = True
+                logger.info(f"Saved CH{i+1}: Rate {rate:.3f} mL/min, ID {p['tubing_id'][i]}mm, OD {p['tubing_od'][i]}mm")
+                
+        if saved_any:
+            self.config.save()
+            self.update_cal_labels()
+            QMessageBox.information(self, "Saved", "Calibration saved for selected channels.")
+        else:
+            QMessageBox.warning(self, "No Channels", "Check the boxes for the channels you want to save.")
 
     def build_sequencer_tab(self):
         widget = QWidget()
@@ -787,93 +926,54 @@ class JebaoPumpGUI(QMainWindow):
     def update_manual_labels(self):
         if not self.current_pump_did: return
         pump_data = self.config.get_pump(self.current_pump_did)
+        
         for spin in self.channel_spins: spin.blockSignals(True)
+        for combo in self.channel_units: combo.blockSignals(True)
+        
         for i, spin in enumerate(self.channel_spins):
-            if i < len(pump_data["volumes"]): spin.setValue(pump_data["volumes"][i])
+            if i < len(pump_data["volumes"]): 
+                spin.setValue(pump_data["volumes"][i])
+            if i < len(pump_data.get("units", [])):
+                idx = self.channel_units[i].findText(pump_data["units"][i])
+                if idx >= 0:
+                    self.channel_units[i].setCurrentIndex(idx)
+                    
+        for combo in self.channel_units: combo.blockSignals(False)
         for spin in self.channel_spins: spin.blockSignals(False)
         
-        self.update_center_panel_state(True)
         self.update_cal_labels()
 
     def save_current_pump_state(self):
         if not self.current_pump_did: return
         pump_data = self.config.get_pump(self.current_pump_did)
         pump_data["volumes"] = [spin.value() for spin in self.channel_spins]
+        pump_data["units"] = [combo.currentText() for combo in self.channel_units]
         self.config.save()
 
     def set_status_color(self, label, connected):
         if connected:
-            label.setText("CLOUD CONNECTED")
-            label.setStyleSheet("background-color: green; color: white; font-weight: bold; padding: 5px;")
+            label.setStyleSheet("color: #28A745; font-weight: bold; font-size: 14px;")
+            label.setText("CONNECTED")
         else:
-            label.setText("CLOUD DISCONNECTED")
-            label.setStyleSheet("background-color: red; color: white; font-weight: bold; padding: 5px;")
-
-    def update_center_panel_state(self, enabled):
-        self.tabs.setEnabled(enabled)
+            label.setStyleSheet("color: #DC3545; font-weight: bold; font-size: 14px;")
+            label.setText("DISCONNECTED")
 
     # --- Calibration Logic ---
-    def update_cal_labels(self):
-        did = self.cal_pump_combo.currentData()
-        if not did:
-            self.lbl_cal_current.setText("Current Rate: ? mL/min")
-            return
-            
-        p = self.config.get_pump(did)
-        idx = self.cal_combo.currentIndex()
-        rate = p["calibration"][idx]
-        self.lbl_cal_current.setText(f"Current Rate: {rate:.3f} mL/min")
-        
-        self.cal_id_spin.setValue(p["tubing_id"][idx])
-        self.cal_od_spin.setValue(p["tubing_od"][idx])
-
-    def run_calibration(self):
-        did = self.cal_pump_combo.currentData()
-        if not did: return
-        self.btn_cal_run.setEnabled(False)
-        asyncio.create_task(self._async_calibration_run(did))
-        
-    async def _async_calibration_run(self, did):
-        idx = self.cal_combo.currentIndex()
-        channel_key = f"channe{idx+1}"
-        try:
-            await self.send_cloud_command(did, {channel_key: True})
-            logger.info("Motor ON. Waiting 60 seconds...")
-            await asyncio.sleep(60.0)
-            await self.send_cloud_command(did, {channel_key: False})
-            logger.info("Motor OFF. Please enter the measured volume and click Save.")
-        except Exception as e:
-            logger.error(f"Calibration run failed: {e}")
-        finally:
-            self.btn_cal_run.setEnabled(True)
-
-    def save_calibration(self):
-        did = self.cal_pump_combo.currentData()
-        if not did: return
-        vol = self.cal_spin.value()
-        rate = vol # Since the run is 60s, the volume is exactly the mL/min rate
-        
-        idx = self.cal_combo.currentIndex()
-        p = self.config.get_pump(did)
-        p["calibration"][idx] = rate
-        p["tubing_id"][idx] = self.cal_id_spin.value()
-        p["tubing_od"][idx] = self.cal_od_spin.value()
-        
-        self.config.save()
-        self.update_cal_labels()
-        logger.info(f"Saved calibration: Channel {idx+1} flows at {rate:.3f} mL/min (Tubing: {p['tubing_id'][idx]}mm ID / {p['tubing_od'][idx]}mm OD).")
-
     # --- Manual & Sequencer Control ---
-    def trigger_dose(self, did, channel, volume_ml):
+    def trigger_dose(self, did, channel, value, unit="Vol (mL)"):
         if not did: return
-        asyncio.create_task(self._async_dose(did, channel, volume_ml))
+        asyncio.create_task(self._async_dose(did, channel, value, unit))
 
-    async def _async_dose(self, did, channel, volume_ml):
+    async def _async_dose(self, did, channel, value, unit):
         try:
-            rate = self.config.get_pump(did)["calibration"][channel-1]
-            seconds = (volume_ml / rate) * 60.0
-            
-            logger.info(f"Dosing {volume_ml}mL on CH{channel}. Motor running for {seconds:.1f}s...")
+            if unit == "Time (s)":
+                seconds = value
+                logger.info(f"Dosing for {seconds:.1f}s on CH{channel}...")
+            else:
+                rate = self.config.get_pump(did)["calibration"][channel-1]
+                seconds = (value / rate) * 60.0
+                logger.info(f"Dosing {value}mL on CH{channel}. Motor running for {seconds:.1f}s...")
+                
             channel_key = f"channe{channel}"
             
             await self.send_cloud_command(did, {channel_key: True})
@@ -1215,6 +1315,15 @@ class JebaoPumpGUI(QMainWindow):
         except Exception as e:
             for task in tasks: task.cancel()
             logger.error(f"Sequence aborted due to error: {e}")
+        finally:
+            for ch in range(1, 5):
+                if self._ch_review_events.get(ch):
+                    self._ch_review_events[ch].set()
+                    self._ch_review_events[ch] = None
+                self.btn_approve_channels[ch-1].setEnabled(False)
+                self.btn_approve_channels[ch-1].setStyleSheet("background-color: #6C757D; color: white;")
+            self.btn_approve_all.setEnabled(False)
+            self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
 
     async def _run_channel_sequence(self, ch, seq_name, seq_data, call_stack, sync_barriers):
         if seq_name in call_stack:
@@ -1256,13 +1365,16 @@ class JebaoPumpGUI(QMainWindow):
                 
             elif action == "Pause (User Review)":
                 logger.info(f"[CH{ch} Step {r+1}] Paused for User Review.")
+                
                 event = asyncio.Event()
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle(f"Review: CH{ch}")
-                dlg.setText(f"[Step {r+1}] User review requested for Channel {ch}.\n\nClick OK to resume.")
-                dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                dlg.finished.connect(lambda: event.set())
-                dlg.show()
+                self._ch_review_events[ch] = event
+                
+                # Enable the UI buttons
+                self.btn_approve_channels[ch-1].setEnabled(True)
+                self.btn_approve_channels[ch-1].setStyleSheet("background-color: #28A745; color: white;")
+                self.btn_approve_all.setEnabled(True)
+                self.btn_approve_all.setStyleSheet("background-color: #0078D7; color: white;")
+                
                 await event.wait()
                 logger.info(f"[CH{ch} Step {r+1}] Resumed from User Review.")
                 
