@@ -316,6 +316,12 @@ class JebaoPumpGUI(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
+        # --- HEADER (Clock) ---
+        self.lbl_clock = QLabel()
+        self.lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_clock.setStyleSheet("font-size: 16px; font-weight: bold; padding: 5px;")
+        main_layout.addWidget(self.lbl_clock)
+
         # --- TOP SPLITTER (Queue & Main UI) ---
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
         
@@ -464,6 +470,16 @@ class JebaoPumpGUI(QMainWindow):
         
         self.refresh_saved_sequences_ui()
 
+        # Start Clock Timer
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start(1000)
+        self.update_clock()
+
+    def update_clock(self):
+        now = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
+        self.lbl_clock.setText(now)
+
     def open_settings(self):
         dlg = SettingsDialog(self.secrets, self.config, self)
         if dlg.exec():
@@ -589,12 +605,43 @@ class JebaoPumpGUI(QMainWindow):
         ctrl_layout.addStretch()
         layout.addLayout(ctrl_layout)
         
+        # --- Mass-to-Volume Density Selector ---
+        density_layout = QHBoxLayout()
+        density_layout.addWidget(QLabel("Input Mode:"))
+        self.cal_input_mode = QComboBox()
+        self.cal_input_mode.addItems(["Volume (mL)", "Mass (g)"])
+        self.cal_input_mode.currentIndexChanged.connect(self.on_cal_mode_changed)
+        density_layout.addWidget(self.cal_input_mode)
+        
+        self.lbl_liquid = QLabel("Liquid Type:")
+        density_layout.addWidget(self.lbl_liquid)
+        
+        self.cal_liquid_type = QComboBox()
+        self.cal_liquid_type.addItems(["Water (1.000 g/mL)", "Ethanol (0.789 g/mL)", "Methanol (0.792 g/mL)", "Custom Density"])
+        self.cal_liquid_type.currentIndexChanged.connect(self.on_cal_mode_changed)
+        density_layout.addWidget(self.cal_liquid_type)
+        
+        self.cal_custom_density = QDoubleSpinBox()
+        self.cal_custom_density.setRange(0.001, 20.0)
+        self.cal_custom_density.setDecimals(3)
+        self.cal_custom_density.setValue(1.000)
+        self.cal_custom_density.setSuffix(" g/mL")
+        density_layout.addWidget(self.cal_custom_density)
+        density_layout.addStretch()
+        
+        # Initially hide density controls since default is Volume
+        self.lbl_liquid.setVisible(False)
+        self.cal_liquid_type.setVisible(False)
+        self.cal_custom_density.setVisible(False)
+        layout.addLayout(density_layout)
+        
         grid = QGridLayout()
         self.cal_checkboxes = []
         self.cal_vol_spins = []
         self.cal_id_spins = []
         self.cal_od_spins = []
         self.cal_rate_labels = []
+        self.cal_meas_labels = []
         
         for i in range(4):
             ch_num = i + 1
@@ -633,7 +680,9 @@ class JebaoPumpGUI(QMainWindow):
             
             # Volume input
             h3 = QHBoxLayout()
-            h3.addWidget(QLabel("Meas Vol:"))
+            lbl_meas = QLabel("Meas Vol (mL):")
+            self.cal_meas_labels.append(lbl_meas)
+            h3.addWidget(lbl_meas)
             vol_spin = QDoubleSpinBox()
             vol_spin.setRange(0.1, 999.9)
             vol_spin.setValue(60.0)
@@ -658,6 +707,19 @@ class JebaoPumpGUI(QMainWindow):
         layout.addLayout(btn_layout)
         layout.addStretch()
         return widget
+
+    def on_cal_mode_changed(self):
+        is_mass = (self.cal_input_mode.currentText() == "Mass (g)")
+        
+        self.lbl_liquid.setVisible(is_mass)
+        self.cal_liquid_type.setVisible(is_mass)
+        
+        is_custom = is_mass and ("Custom" in self.cal_liquid_type.currentText())
+        self.cal_custom_density.setVisible(is_custom)
+        
+        label_text = "Meas Mass (g):" if is_mass else "Meas Vol (mL):"
+        for lbl in self.cal_meas_labels:
+            lbl.setText(label_text)
 
     def update_cal_labels(self):
         did = self.cal_pump_combo.currentData()
@@ -706,9 +768,24 @@ class JebaoPumpGUI(QMainWindow):
         p = self.config.get_pump(did)
         saved_any = False
         
+        is_mass = (self.cal_input_mode.currentText() == "Mass (g)")
+        density = 1.000
+        if is_mass:
+            liq = self.cal_liquid_type.currentText()
+            if "Water" in liq: density = 1.000
+            elif "Ethanol" in liq: density = 0.789
+            elif "Methanol" in liq: density = 0.792
+            else: density = self.cal_custom_density.value()
+        
         for i, cb in enumerate(self.cal_checkboxes):
             if cb.isChecked():
-                vol = self.cal_vol_spins[i].value()
+                val = self.cal_vol_spins[i].value()
+                if is_mass:
+                    vol = val / density
+                    logger.info(f"CH{i+1}: Converted {val}g / {density:.3f}g/mL = {vol:.3f}mL")
+                else:
+                    vol = val
+                    
                 rate = vol  # 60s run means vol == mL/min
                 p["calibration"][i] = rate
                 p["tubing_id"][i] = self.cal_id_spins[i].value()
