@@ -1,5 +1,20 @@
 import sys
 import os
+
+# --- Code vs data -----------------------------------------------------------
+# Code lives in GitHub Projects/UAkron/<repo>; data (exports, backups, logs and
+# this machine's config) lives in SyncThing. The app runs with the data folder as
+# its working directory, so relative paths like "Data/" land there.
+# Override with UAKRON_APP_DATA_DIR (this app) or UAKRON_DATA_DIR (data root).
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.argv[0] = os.path.abspath(sys.argv[0])  # keeps "Restart" working after chdir
+DATA_DIR = os.environ.get("UAKRON_APP_DATA_DIR") or os.path.join(
+    os.environ.get("UAKRON_DATA_DIR")
+    or os.path.join(os.path.expanduser("~"), "SyncThing", "UAkron Playground"),
+    "Jebao Pump",
+)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.chdir(DATA_DIR)
 import json
 import asyncio
 import logging
