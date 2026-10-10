@@ -2,8 +2,8 @@ import sys
 import os
 
 # --- Code vs data -----------------------------------------------------------
-# Code lives in GitHub Projects/UAkron/<repo>; data (exports, backups, logs and
-# this machine's config) lives in SyncThing. The app runs with the data folder as
+# Code lives in GitHub Projects/UAkron/<repo>; data (exports, backups, logs) lives
+# in SyncThing. The app runs with the data folder as
 # its working directory, so relative paths like "Data/" land there.
 # Override with UAKRON_APP_DATA_DIR (this app) or UAKRON_DATA_DIR (data root).
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +15,9 @@ DATA_DIR = os.environ.get("UAKRON_APP_DATA_DIR") or os.path.join(
 )
 os.makedirs(DATA_DIR, exist_ok=True)
 os.chdir(DATA_DIR)
+# Per-machine settings (config, secrets, ROIs) live next to the app, gitignored.
+# They never go into SyncThing or GitHub. Frozen builds keep them next to the executable.
+CONFIG_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else script_dir
 import json
 import asyncio
 import logging
@@ -69,7 +72,7 @@ APP_ID = "c3703c4888ec4736a3a0d9425c321604"
 DOMAIN = "usapi.gizwits.com"
 
 class SecretsManager:
-    def __init__(self, filepath="secrets.json"):
+    def __init__(self, filepath=os.path.join(CONFIG_DIR, "secrets.json")):
         self.filepath = filepath
         self.data = {"username": "", "password": ""}
         self.load()
@@ -153,7 +156,7 @@ class CheckableComboBox(QComboBox):
         self.setCurrentIndex(0)
 
 class ConfigManager:
-    def __init__(self, filepath="jebao_config.json"):
+    def __init__(self, filepath=os.path.join(CONFIG_DIR, "jebao_config.json")):
         self.filepath = filepath
         self.data = {"pumps": {}, "sequence": [], "saved_sequences": {}}
         self.load()
