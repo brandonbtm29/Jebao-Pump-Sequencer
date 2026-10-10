@@ -6,3 +6,8 @@ __pycache__/
 secrets.json
 jebao_config.json
 crash_log.txt
+
+# Local environment / Claude Code personal files
+.venv/
+CLAUDE.local.md
+.claude/settings.local.json
