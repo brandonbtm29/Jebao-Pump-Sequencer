@@ -13,3 +13,7 @@ CLAUDE.local.md
 .claude/settings.local.json
 # Per-machine pointer to the settings folder
 settings_location.json
+
+# Reference material lives in SyncThing (Jebao Pump/Reference/), not in this public repo
+Manuals, Refs/
+archive_tests_scripts/

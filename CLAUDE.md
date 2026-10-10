@@ -16,7 +16,7 @@ PyQt6 app that drives Jebao MD-4.4 / Doser 2.4 4-channel dosing pumps (5 pumps, 
 - Jun 2026: the original spec (`Agent Instructions/Project Specification.docx`) was a local UDP/TCP app using `python-jebao` + `qasync`. It was superseded by the cloud refactor on 26 Jun 2026.
 - Jul 2026: UI layout, async handling and user-review flow updates.
 - Open: **Wi-Fi provisioning reverse engineering** (`Reverse_Engineering_Plan.md`). The goal is to bulk-provision factory-reset pumps without the phone app. The likely protocol is ESPTouch/SmartConfig: capture the Jebao Aqua app's traffic with Wireshark on the Mac, then write `jebao_provisioner.py`.
-- `archive_tests_scripts/` contains third-party repos used for reference. Don't modify them.
+- Reference material is kept out of this public repo, in SyncThing: `UAkron Playground/Jebao Pump/Reference/` holds the Jebao manual (`Manuals, Refs/`) and the third-party reference repos and test scripts (`archive_tests_scripts/`). Don't modify them, and don't copy them back into the repo.
 
 ## Where code and data live
 - **Code** (this repo) is cloned outside SyncThing: `%USERPROFILE%\GitHub Projects\UAkron\Jebao-Pump-Sequencer` on Windows, `~/GitHub Projects/UAkron/Jebao-Pump-Sequencer` on the Mac. It syncs through GitHub only.
