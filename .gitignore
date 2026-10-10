@@ -11,3 +11,5 @@ crash_log.txt
 .venv/
 CLAUDE.local.md
 .claude/settings.local.json
+# Per-machine pointer to the settings folder
+settings_location.json

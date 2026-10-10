@@ -15,9 +15,15 @@ DATA_DIR = os.environ.get("UAKRON_APP_DATA_DIR") or os.path.join(
 )
 os.makedirs(DATA_DIR, exist_ok=True)
 os.chdir(DATA_DIR)
-# Per-machine settings (config, secrets, ROIs) live next to the app, gitignored.
-# They never go into SyncThing or GitHub. Frozen builds keep them next to the executable.
-CONFIG_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else script_dir
+# Settings (config, secrets, ROIs) live in the app folder by default, gitignored.
+# The "Settings Folder" option (settings_location.py) can point them at a synced
+# folder instead, e.g. "Settings" inside the data folder.
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import settings_location
+APP_DIR = settings_location.app_folder(script_dir)
+CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
+SETTINGS_FILES = ['jebao_config.json', 'secrets.json']
 import json
 import asyncio
 import logging
@@ -271,6 +277,10 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        layout.addRow(settings_location.settings_folder_box(
+            APP_DIR, DATA_DIR, SETTINGS_FILES,
+            save_cb=lambda: (config_manager.save(), secrets_manager.save()),
+            restart_cb=getattr(parent, "restart_app", None)))
         layout.addRow(buttons)
         
     def accept(self):
