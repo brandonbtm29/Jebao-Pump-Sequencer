@@ -22,3 +22,6 @@ PyQt6 app that drives Jebao MD-4.4 / Doser 2.4 4-channel dosing pumps (5 pumps, 
 - **Code** (this repo) is cloned outside SyncThing: `%USERPROFILE%\GitHub Projects\UAkron\Jebao-Pump-Sequencer` on Windows, `~/GitHub Projects/UAkron/Jebao-Pump-Sequencer` on the Mac. It syncs through GitHub only.
 - **Instrument data** stays in SyncThing: `%USERPROFILE%\SyncThing\UAkron Playground\Jebao Pump\` (Mac: `~/SyncThing/UAkron Playground/Jebao Pump/`). Never copy data, `config.json` or `secrets.json` into the repo.
 - **How it works (since 10 Oct 2026):** at startup the app `chdir`s into its SyncThing data folder (`DATA_DIR`, override with `UAKRON_APP_DATA_DIR` or `UAKRON_DATA_DIR`). Every relative path (`Data/`, `Data Backups/`, `Sessions/`, run logs, local config such as `config.json` / `pump_config.json` / `jebao_config.json` / `secrets.json` / `global_rois.json`) therefore resolves inside SyncThing. Files that ship with the code (icons, the OCR model) must be loaded via `script_dir` / `__file__`, never by bare relative name. Run the app from this clone.
+
+## Launch
+Double-click `Launch_Windows.bat` / `Launch_Mac.command`. They use this repo's `.venv` (create it with `python -m venv .venv` and `pip install -r requirements.txt`). Windows Smart App Control may be on; if a DLL import is "blocked by an Application Control policy", retry once before investigating.
