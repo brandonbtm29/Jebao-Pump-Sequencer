@@ -18,8 +18,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **User review steps**: a sequence can stop and wait until you click **Approve** for that channel.
 - **Emergency stop**: one button cancels the running sequence, clears the queue and turns off all four channels on every pump.
 - **Shared settings**: keep your login, calibrations and sequences in a synced folder so every computer uses the same ones.
-- **Updates from inside the app**: **Settings → Check for Updates** looks for a newer release on GitHub and, if you want, updates and restarts the app. It won't update while a sequence, dose or calibration is running.
-- **Desktop shortcut**: **Settings → Create Desktop Shortcut** puts an icon on your desktop that starts the app. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock.
+- **Version and updates**: the version is shown in the bottom-right corner. When a newer release is out it turns orange ("Update available"); click it to see what changed and update. It won't update while a sequence, dose or calibration is running.
+- **Desktop shortcut**: the app puts an icon on your desktop the first time it starts and refreshes it after each update. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock. You can turn this off in Settings.
 
 ![Manual Control tab](docs/screenshot-manual.png)
 
@@ -49,8 +49,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
    python3 -m venv .venv
    .venv/bin/pip install -e .
    ```
-3. Start it: double-click `Launch_Windows.bat` or `Launch_Mac.command`. You can also run `python jebao_gui.py`, or the `jebao-pump` command that the install adds to the virtual environment.
-4. Optional: open **Settings** and press **Create Desktop Shortcut**, so next time you can start the app from your desktop.
+3. Start it: double-click `Launch_Windows.bat` or `Launch_Mac.command`. The launcher's console or Terminal window closes once the app starts (it stays open with a message if something is missing). You can also run `python jebao_gui.py`, or the `jebao-pump` command that the install adds to the virtual environment.
+4. The first time the app starts it puts a **Jebao Pump Sequencer** icon on your desktop. Use that from then on.
 
 ## First run
 
@@ -61,12 +61,13 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 
 ## Updating
 
-Open **Settings** and press **Check for Updates**. If a newer release is out, you can read what changed and choose **Update and Restart**. The app:
+Each time it starts, the app asks GitHub for the latest release (a normal web request; nothing about you or your pumps is sent). If a newer one is out, the version in the bottom-right corner turns orange. Click it, or open **Settings** and press **Check for Updates**, to read what changed and choose **Update and Restart**. The app:
 
 - only moves to published releases, never to unfinished work;
 - refuses if you changed any of the app's own files, so nothing of yours is overwritten;
 - reinstalls the dependencies only when the release changed them, and goes back to the old version if that fails;
-- won't update while a sequence is running or queued, or a dose or calibration is in progress. Restarting mid-dose could leave a pump running.
+- won't update while a sequence is running or queued, or a dose or calibration is in progress. Restarting mid-dose could leave a pump running;
+- refreshes the desktop shortcut after the restart, so its icon and target match the new version.
 
 This needs a copy made with `git clone` and Git installed. A ZIP download can't update itself; the app links to the release page instead. You can also update by hand with `git pull` and `pip install -e .`.
 
