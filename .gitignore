@@ -30,3 +30,6 @@ archive_tests_scripts/
 Thumbs.db
 .vscode/
 .idea/
+
+# --- Local scratch work ---
+scratch/

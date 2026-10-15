@@ -18,6 +18,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **User review steps**: a sequence can stop and wait until you click **Approve** for that channel.
 - **Emergency stop**: one button cancels the running sequence, clears the queue and turns off all four channels on every pump.
 - **Shared settings**: keep your login, calibrations and sequences in a synced folder so every computer uses the same ones.
+- **Updates from inside the app**: **Settings → Check for Updates** looks for a newer release on GitHub and, if you want, updates and restarts the app. It won't update while a sequence, dose or calibration is running.
+- **Desktop shortcut**: **Settings → Create Desktop Shortcut** puts an icon on your desktop that starts the app. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock.
 
 ![Manual Control tab](docs/screenshot-manual.png)
 
@@ -48,6 +50,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
    .venv/bin/pip install -e .
    ```
 3. Start it: double-click `Launch_Windows.bat` or `Launch_Mac.command`. You can also run `python jebao_gui.py`, or the `jebao-pump` command that the install adds to the virtual environment.
+4. Optional: open **Settings** and press **Create Desktop Shortcut**, so next time you can start the app from your desktop.
 
 ## First run
 
@@ -55,6 +58,17 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 2. The app logs in and lists your pumps under **Connected Pumps**. It uses the names you gave them in the phone app.
 3. Calibrate each channel you plan to use (**Calibration** tab). Until you do, the app assumes 1 mL/min, so volume doses will be wrong.
 4. Try a small manual dose, then build a sequence.
+
+## Updating
+
+Open **Settings** and press **Check for Updates**. If a newer release is out, you can read what changed and choose **Update and Restart**. The app:
+
+- only moves to published releases, never to unfinished work;
+- refuses if you changed any of the app's own files, so nothing of yours is overwritten;
+- reinstalls the dependencies only when the release changed them, and goes back to the old version if that fails;
+- won't update while a sequence is running or queued, or a dose or calibration is in progress. Restarting mid-dose could leave a pump running.
+
+This needs a copy made with `git clone` and Git installed. A ZIP download can't update itself; the app links to the release page instead. You can also update by hand with `git pull` and `pip install -e .`.
 
 ## Configuration
 
@@ -101,6 +115,8 @@ The tests run headless (`QT_QPA_PLATFORM=offscreen` is set for you) and never to
 The version number lives in one place, `__version__` in `jebao_gui.py`. To make a release, bump it, move the "Unreleased" notes in `CHANGELOG.md` under the new version, then tag `vX.Y.Z` and create a GitHub release from those notes.
 
 `settings_location.py` is shared, unchanged, by several of my lab apps, so ruff leaves it alone.
+
+The icon in `assets/` is drawn by `scripts/make_icon.py` (needs `pip install pillow`); run it again after changing the design.
 
 ## How this was built
 

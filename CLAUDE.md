@@ -14,7 +14,9 @@ PyQt6 app that drives Jebao MD-4.4 / Doser 2.4 4-channel dosing pumps (5 pumps, 
 - Emergency stop sends all four channels `false` to every pump.
 - `ConfigManager` → `jebao_config.json`: names, calibration (flow rates) and last volumes, keyed by cloud device id (`did`).
 - `SecretsManager` → `secrets.json`: Jebao account email and password. **Gitignored. Never print, log, commit or copy its contents.**
-- Main classes in `jebao_gui.py` (~1,900 lines): `GUILogHandler`, `CheckableComboBox`, `SettingsDialog`, `JebaoPumpGUI`.
+- Main classes in `jebao_gui.py` (~2,100 lines): `GUILogHandler`, `CheckableComboBox`, `AppBox` (Settings → updates + desktop shortcut), `SettingsDialog`, `JebaoPumpGUI`.
+- `updater.py`: checks GitHub's latest release, fast-forwards a git clone to the tag, reinstalls (`pip install -e .`) only if `pyproject.toml` changed, rolls back on failure. Same design as Balance-Streamer-GUI and Masterflex. `JebaoPumpGUI.busy_reason()` blocks updating while a sequence/queue, manual dose or calibration is running (`_motor_jobs` counter).
+- `shortcut.py`: desktop shortcut per OS (Windows .lnk via PowerShell with env-var values, macOS .app bundle, Linux .desktop), pointing at this clone's Python and `jebao_gui.py`. Icons in `assets/` (drawn by `scripts/make_icon.py`).
 
 ## History and open work
 - Jun 2026: the original spec (now in SyncThing `Jebao Pump/Archive/Removed from repo 2026-10-15/`) was a local UDP/TCP app using `python-jebao` + `qasync`. It was superseded by the cloud refactor on 26 Jun 2026.
