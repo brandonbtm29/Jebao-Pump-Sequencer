@@ -1,20 +1,32 @@
-# Python
-__pycache__/
-*.py[cod]
-
-# App Configs
+# --- Your private settings: NEVER commit these ---
+# Jebao account login and pump settings (see examples/ for the format)
 secrets.json
 jebao_config.json
-crash_log.txt
-
-# Local environment / Claude Code personal files
-.venv/
-CLAUDE.local.md
-.claude/settings.local.json
 # Per-machine pointer to the settings folder
 settings_location.json
+crash_log.txt
 
-# Reference material lives in SyncThing (Jebao Pump/Reference/), not in this public repo
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# --- Local Claude Code files ---
+CLAUDE.local.md
+.claude/settings.local.json
+
+# --- Reference material lives in SyncThing (Jebao Pump/Reference/), not in this public repo ---
 Manuals, Refs/
 archive_tests_scripts/
+
+# --- OS / editor junk ---
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/

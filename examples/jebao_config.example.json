@@ -1,0 +1,20 @@
+{
+    "_comment": "Optional. The app creates jebao_config.json itself; this shows its shape. Keys under 'pumps' are Gizwits device ids (did) from your account.",
+    "theme": "Dark",
+    "text_size": "Medium",
+    "pump_order": ["EXAMPLEDID0000000001"],
+    "pumps": {
+        "EXAMPLEDID0000000001": {
+            "volumes": [10.0, 10.0, 10.0, 10.0],
+            "units": ["Vol (mL)", "Vol (mL)", "Time (s)", "Vol (mL)"],
+            "calibration": [1.0, 1.0, 1.0, 1.0],
+            "tubing_id": [2.0, 2.0, 2.0, 2.0],
+            "tubing_od": [4.0, 4.0, 4.0, 4.0]
+        }
+    },
+    "sequence": [
+        {"pump_did": "EXAMPLEDID0000000001", "channel": [1], "action": "Dose", "val1": 5.0, "val2": 0, "val3": 0},
+        {"pump_did": "EXAMPLEDID0000000001", "channel": [1], "action": "Pause", "val1": 30.0, "val2": 0, "val3": 0}
+    ],
+    "saved_sequences": {}
+}
