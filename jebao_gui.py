@@ -314,7 +314,9 @@ class AppBox(QGroupBox):
         self._progress = None
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"You are running Jebao Pump Sequencer <b>{__version__}</b>."))
-        self.lbl_status = QLabel("The app checks GitHub for a newer release each time it starts, or now with this button.")
+        self.lbl_status = QLabel(
+            "The app checks GitHub for a newer release each time it starts, or now with this button."
+        )
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.lbl_status)
