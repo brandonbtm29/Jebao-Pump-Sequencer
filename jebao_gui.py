@@ -2,8 +2,8 @@
 
 __version__ = "0.1.0"
 
-import sys
 import os
+import sys
 
 # --- Code vs data -----------------------------------------------------------
 # Code lives in GitHub Projects/UAkron/<repo>; data (exports, backups, logs) lives
@@ -29,50 +29,48 @@ import settings_location
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
 SETTINGS_FILES = ["jebao_config.json", "secrets.json"]
-import json
 import asyncio
+import json
 import logging
-import traceback
 import subprocess
-import requests
 import time
+import traceback
 from datetime import datetime
 
+import qasync
+import requests
+from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtGui import QColor, QPalette, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QTextEdit,
-    QGroupBox,
-    QMessageBox,
-    QFrame,
-    QDoubleSpinBox,
-    QListWidget,
-    QListWidgetItem,
-    QInputDialog,
-    QSplitter,
-    QTabWidget,
-    QComboBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView,
     QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
     QStackedWidget,
-    QCheckBox,
+    QTableWidget,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent
-from PyQt6.QtGui import QColor, QPalette, QStandardItemModel, QStandardItem
-
-import qasync
 
 
 def log_uncaught_exceptions(ex_cls, ex, tb):
@@ -111,7 +109,7 @@ DOMAIN = "usapi.gizwits.com"
 
 
 class SecretsManager:
-    def __init__(self, filepath=os.path.join(CONFIG_DIR, "secrets.json")):
+    def __init__(self, filepath=os.path.join(CONFIG_DIR, "secrets.json")):  # noqa: B008
         self.filepath = filepath
         self.data = {"username": "", "password": ""}
         self.load()
@@ -119,7 +117,7 @@ class SecretsManager:
     def load(self):
         if os.path.exists(self.filepath):
             try:
-                with open(self.filepath, "r") as f:
+                with open(self.filepath) as f:
                     self.data = json.load(f)
             except Exception as e:
                 logger.error(f"Failed to load secrets: {e}")
@@ -197,7 +195,7 @@ class CheckableComboBox(QComboBox):
 
 
 class ConfigManager:
-    def __init__(self, filepath=os.path.join(CONFIG_DIR, "jebao_config.json")):
+    def __init__(self, filepath=os.path.join(CONFIG_DIR, "jebao_config.json")):  # noqa: B008
         self.filepath = filepath
         self.data = {"pumps": {}, "sequence": [], "saved_sequences": {}}
         self.load()
@@ -205,14 +203,14 @@ class ConfigManager:
     def load(self):
         if os.path.exists(self.filepath):
             try:
-                with open(self.filepath, "r") as f:
+                with open(self.filepath) as f:
                     data = json.load(f)
                     if isinstance(data.get("pumps"), list):
                         # Migrate old array config to dict config or just wipe it
                         self.data = {"pumps": {}}
                     else:
                         self.data = data
-            except Exception as e:
+            except Exception:
                 self.data = {"pumps": {}, "sequence": [], "saved_sequences": {}}
 
             self.data.setdefault("sequence", [])
@@ -571,7 +569,7 @@ class JebaoPumpGUI(QMainWindow):
         logger.info("Restarting application...")
         if hasattr(self, "seq_table"):
             self.auto_save_sequence()
-        subprocess.Popen([sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable] + sys.argv)  # noqa: S603 (restarts this same app)
         QApplication.quit()
 
     def toggle_channel_pause(self, ch, btn):
@@ -1180,7 +1178,7 @@ class JebaoPumpGUI(QMainWindow):
             await self._interruptible_motor_run(channel, did, seconds)
             await self.send_cloud_command(did, {channel_key: False})
 
-            logger.info(f"Dose complete.")
+            logger.info("Dose complete.")
         except asyncio.CancelledError:
             logger.warning(f"Manual Dose on CH{channel} was cancelled.")
         except Exception as e:
@@ -1262,7 +1260,6 @@ class JebaoPumpGUI(QMainWindow):
 
     def _update_row_ui(self, row, action_type):
         pump_cb = self.seq_table.cellWidget(row, 0)
-        ch_cb = self.seq_table.cellWidget(row, 1)
         val_widget = self.seq_table.cellWidget(row, 3)
         if not hasattr(val_widget, "spins"):
             return
@@ -1813,7 +1810,7 @@ class JebaoPumpGUI(QMainWindow):
             else:
                 try:
                     channels = [int(ch_cb.currentText())]
-                except:
+                except:  # noqa: E722, S110 (kept as-is; see CHANGELOG "Known issues")
                     pass
 
             seq.append(
