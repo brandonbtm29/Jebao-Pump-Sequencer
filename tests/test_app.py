@@ -173,3 +173,15 @@ def test_unreadable_channel_is_logged_not_hidden(window, caplog):
         steps = window._get_sequence_data()
     assert steps[0]["channel"] == [1]
     assert any("couldn't read the channel" in r.getMessage() for r in caplog.records)
+
+
+def test_icon_files_exist_and_load(qt_loop):
+    from PyQt6.QtGui import QIcon
+
+    for name in ("jebao.png", "jebao.ico", "jebao.icns"):
+        path = jebao_gui.os.path.join(jebao_gui.ICON_DIR, name)
+        assert jebao_gui.os.path.getsize(path) > 1000, name
+    assert not QIcon(jebao_gui.os.path.join(jebao_gui.ICON_DIR, "jebao.png")).isNull()
+    app, _ = qt_loop
+    jebao_gui.set_app_icon(app)
+    assert not app.windowIcon().isNull()

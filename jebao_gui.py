@@ -40,7 +40,7 @@ from datetime import datetime
 import qasync
 import requests
 from PyQt6.QtCore import QEvent, Qt, QTimer
-from PyQt6.QtGui import QColor, QPalette, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QColor, QIcon, QPalette, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1925,8 +1925,27 @@ class JebaoPumpGUI(QMainWindow):
         self.auto_save_sequence()
 
 
+ICON_DIR = os.path.join(script_dir, "assets")
+
+
+def set_app_icon(app):
+    """Show the app's own icon in the window, the Dock and the Windows taskbar."""
+    if sys.platform == "win32":
+        # Without this, Windows groups the app under python.exe and shows Python's icon.
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("brandonbtm29.JebaoPumpSequencer")
+        except (AttributeError, OSError):
+            pass
+    icon = os.path.join(ICON_DIR, "jebao.ico" if sys.platform == "win32" else "jebao.png")
+    if os.path.exists(icon):
+        app.setWindowIcon(QIcon(icon))
+
+
 def main():
     app = QApplication(sys.argv)
+    set_app_icon(app)
 
     # Load config to apply theme early
     config = ConfigManager()

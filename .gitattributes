@@ -15,5 +15,6 @@
 *.png     binary
 *.jpg     binary
 *.ico     binary
+*.icns    binary
 *.docx    binary
 *.pdf     binary
