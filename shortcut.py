@@ -10,6 +10,7 @@ The shortcut points at this folder and its Python, so it keeps working after upd
 Creating it again replaces the old one. No Qt here, so it can be tested on its own.
 """
 
+import json
 import os
 import plistlib
 import shlex
@@ -23,6 +24,29 @@ APP_NAME = "Jebao Pump Sequencer"
 BUNDLE_ID = "io.github.brandonbtm29.jebao-pump-sequencer"
 DESCRIPTION = "Run doses and sequences on Jebao dosing pumps"
 ENTRY_SCRIPT = os.path.join(ROOT, "jebao_gui.py")
+
+
+STATE_FILE = "desktop_shortcut.json"  # per copy of the app, gitignored
+
+
+def load_state(app_dir):
+    """{'auto': bool, 'version': str, 'path': str} for this copy; empty if never made."""
+    try:
+        with open(os.path.join(app_dir, STATE_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(app_dir, state):
+    with open(os.path.join(app_dir, STATE_FILE), "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def needs_refresh(state, version):
+    """Make the shortcut on first launch, and again whenever the app's version changed."""
+    return state.get("auto", True) and state.get("version") != version
 
 
 class ShortcutError(Exception):
@@ -156,7 +180,23 @@ def _create_mac(desktop, version=""):
     with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
         plistlib.dump(info, f)
     os.utime(app)  # nudge Finder to pick up the new icon
+    _register_with_launch_services(app)
     return app
+
+
+LSREGISTER = (
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+)
+
+
+def _register_with_launch_services(app):
+    """Tell macOS about the (re)built app so Finder shows its new icon straight away. Best effort."""
+    if sys.platform != "darwin" or not os.path.exists(LSREGISTER):
+        return
+    try:
+        subprocess.run([LSREGISTER, "-f", app], capture_output=True, timeout=30)  # noqa: S603 - macOS's own tool
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 # --- Linux --------------------------------------------------------------------------------

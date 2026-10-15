@@ -72,3 +72,18 @@ def test_windows_failure_has_a_message(tmp_path):
 
     with pytest.raises(shortcut.ShortcutError, match="Access denied"):
         shortcut._create_windows(str(tmp_path), powershell=failing)
+
+
+def test_state_round_trip_and_refresh_rule(tmp_path):
+    assert shortcut.load_state(str(tmp_path)) == {}
+    assert shortcut.needs_refresh({}, "1.3.0")  # never made
+    shortcut.save_state(str(tmp_path), {"auto": True, "version": "1.3.0", "path": "/x"})
+    state = shortcut.load_state(str(tmp_path))
+    assert not shortcut.needs_refresh(state, "1.3.0")
+    assert shortcut.needs_refresh(state, "1.4.0")  # updated since
+    assert not shortcut.needs_refresh({**state, "auto": False}, "1.4.0")  # turned off
+
+
+def test_unreadable_state_counts_as_never_made(tmp_path):
+    (tmp_path / shortcut.STATE_FILE).write_text("{not json")
+    assert shortcut.load_state(str(tmp_path)) == {}

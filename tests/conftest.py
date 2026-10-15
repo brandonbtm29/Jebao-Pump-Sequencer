@@ -41,8 +41,11 @@ def qt_loop():
 
 
 @pytest.fixture
-def window(qt_loop, monkeypatch):
+def window(qt_loop, monkeypatch, tmp_path):
     """The main window, with no saved login, and with the network blocked."""
+    monkeypatch.setattr(
+        jebao_gui, "APP_DIR", str(tmp_path)
+    )  # where per-copy files like the shortcut record go
 
     def no_network(*args, **kwargs):
         raise AssertionError("tests must not reach the network")

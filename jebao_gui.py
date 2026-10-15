@@ -300,7 +300,7 @@ class _Task(QThread):
             logger.info(f"Update check: {e}")
             self.done.emit(e)
         except Exception as e:  # handed back to the GUI thread and shown there
-            logger.error(f"Update task failed: {e}")
+            logger.error(f"Background task failed: {e}")
             self.done.emit(e)
 
 
@@ -340,6 +340,21 @@ class AppBox(QGroupBox):
         self.btn_shortcut = QPushButton("Create Desktop Shortcut")
         self.btn_shortcut.clicked.connect(self.create_shortcut)
         lay.addWidget(self.btn_shortcut)
+        self.chk_auto_shortcut = QCheckBox("Keep the desktop shortcut up to date automatically")
+        self.chk_auto_shortcut.setToolTip(
+            "Creates the shortcut the first time the app starts, and refreshes it (icon and target) after each update."
+        )
+        self.chk_auto_shortcut.setChecked(shortcut.load_state(APP_DIR).get("auto", True))
+        self.chk_auto_shortcut.toggled.connect(self._auto_shortcut_toggled)
+        lay.addWidget(self.chk_auto_shortcut)
+
+    def _auto_shortcut_toggled(self, on):
+        state = shortcut.load_state(APP_DIR)
+        state["auto"] = bool(on)
+        try:
+            shortcut.save_state(APP_DIR, state)
+        except OSError as e:
+            logger.warning(f"Couldn't save the desktop shortcut setting: {e}")
 
     # --- desktop shortcut ----------------------------------------------------------------
 
@@ -355,6 +370,12 @@ class AppBox(QGroupBox):
             QMessageBox.warning(self, "Desktop Shortcut", f"Couldn't create the shortcut:\n{e}")
             return
         logger.info(f"Created desktop shortcut {path}")
+        state = shortcut.load_state(APP_DIR)
+        state.update({"version": __version__, "path": path})
+        try:
+            shortcut.save_state(APP_DIR, state)
+        except OSError as e:
+            logger.warning(f"Couldn't save the desktop shortcut setting: {e}")
         QMessageBox.information(self, "Desktop Shortcut", f"Created:\n{path}")
 
     # --- checking for updates ------------------------------------------------------------
@@ -370,6 +391,9 @@ class AppBox(QGroupBox):
 
     def _checked(self, result):
         self.btn_check.setEnabled(True)
+        show = getattr(self.main_window, "show_update_state", None)
+        if show:
+            show(result)
         if isinstance(result, Exception):
             msg = str(result) if isinstance(result, LookupError) else f"The check failed: {result}"
             self.lbl_status.setText(msg)
@@ -564,6 +588,7 @@ class JebaoPumpGUI(QMainWindow):
         self._ch_review_events = {1: None, 2: None, 3: None, 4: None}
 
         self.setup_ui()
+        self._build_status_bar()
 
         logger.info("Jebao SPE GUI Initialized (Cloud Mode).")
 
@@ -743,10 +768,84 @@ class JebaoPumpGUI(QMainWindow):
         now = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
         self.lbl_clock.setText(now)
 
-    def open_settings(self):
+    def open_settings(self, then=None):
         dlg = SettingsDialog(self.secrets, self.config, self)
+        if then:
+            QTimer.singleShot(0, lambda: then(dlg))
         if dlg.exec():
             asyncio.create_task(self.login_and_fetch())
+
+    # --- version label and update check ------------------------------------------------------
+
+    def _build_status_bar(self):
+        self._available_release = None
+        self._background_tasks = []
+        self.version_button = QPushButton(f"v{__version__}")
+        self.version_button.setFlat(True)
+        self.version_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.version_button.setToolTip("Jebao Pump Sequencer version. Click to check for updates.")
+        self.version_button.clicked.connect(self.on_version_clicked)
+        self.statusBar().addPermanentWidget(self.version_button)
+
+    def show_update_state(self, result):
+        """Show in the bottom-right label whether a newer release is out."""
+        if isinstance(result, updater.Release) and updater.is_newer(result.version, __version__):
+            self._available_release = result
+            self.version_button.setText(f"v{__version__}  ·  Update available: v{result.version}")
+            self.version_button.setStyleSheet("color: #E67E22; font-weight: bold;")
+            self.version_button.setToolTip("A newer version is out. Click to see what changed and update.")
+            logger.info(
+                f"Version {result.version} is available (you have {__version__}). Click the version in the bottom right to update."
+            )
+        elif isinstance(result, updater.Release):
+            self._available_release = None
+            self.version_button.setText(f"v{__version__}")
+            self.version_button.setStyleSheet("")
+            self.version_button.setToolTip(f"Up to date (latest release: v{result.version}).")
+        elif isinstance(result, Exception):
+            self.version_button.setToolTip(f"Couldn't check for updates: {result}")
+
+    def on_version_clicked(self):
+        release = self._available_release
+        if release is not None:
+            self.open_settings(then=lambda dlg: dlg.app_box._offer(release))
+        else:
+            self.open_settings(then=lambda dlg: dlg.app_box.check())
+
+    def _run_in_background(self, fn, on_done):
+        task = _Task(fn, self)
+        task.done.connect(on_done)
+        task.finished.connect(lambda: self._background_tasks.remove(task))
+        self._background_tasks.append(task)
+        task.start()
+        return task
+
+    def start_background_tasks(self):
+        """Run once after the window opens: check for a newer release and keep the desktop shortcut current."""
+        self._run_in_background(lambda _say: updater.latest_release(__version__), self.show_update_state)
+        self.maintain_desktop_shortcut()
+
+    # --- desktop shortcut kept up to date -----------------------------------------------------
+
+    def maintain_desktop_shortcut(self):
+        """Create the desktop shortcut on first launch and refresh it after each update."""
+        state = shortcut.load_state(APP_DIR)
+        if not shortcut.needs_refresh(state, __version__):
+            return
+        first = not state.get("version")
+        self._run_in_background(
+            lambda _say: shortcut.create_shortcut(version=__version__),
+            lambda result: self._shortcut_done(result, first),
+        )
+
+    def _shortcut_done(self, result, first):
+        if isinstance(result, Exception):
+            logger.warning(f"Couldn't create the desktop shortcut: {result}")
+            return
+        state = shortcut.load_state(APP_DIR)
+        state.update({"version": __version__, "path": result})
+        shortcut.save_state(APP_DIR, state)
+        logger.info(f"Desktop shortcut {'created' if first else 'updated'}: {result}")
 
     def busy_reason(self):
         """Why the app shouldn't restart right now, or '' if it can."""
@@ -2163,6 +2262,7 @@ def main():
 
     window = JebaoPumpGUI()
     window.show()
+    QTimer.singleShot(1500, window.start_background_tasks)
 
     with loop:
         loop.run_forever()

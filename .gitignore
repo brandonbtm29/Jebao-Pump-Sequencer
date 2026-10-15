@@ -4,6 +4,8 @@ secrets.json
 jebao_config.json
 # Per-machine pointer to the settings folder
 settings_location.json
+# Per-copy record of the desktop shortcut the app made
+desktop_shortcut.json
 crash_log.txt
 
 # --- Python ---

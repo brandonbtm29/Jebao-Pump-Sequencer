@@ -270,3 +270,91 @@ def test_shortcut_button(window, monkeypatch):
     monkeypatch.setattr(jebao_gui.QMessageBox, "information", lambda *a: shown.append(a[2]))
     jebao_gui.AppBox(window).create_shortcut()
     assert shown == ["Created:\n/Desktop/Jebao.app"]
+
+
+# --- version label, update check at launch, automatic desktop shortcut ---------------------
+
+
+def _release(version):
+    return jebao_gui.updater.Release(version, "v" + version, "Jebao " + version, "notes", "https://example")
+
+
+def test_version_shown_bottom_right(window):
+    assert window.version_button.text() == f"v{jebao_gui.__version__}"
+    assert window.statusBar().isAncestorOf(window.version_button)
+
+
+def test_version_label_turns_orange_when_outdated(window):
+    window.show_update_state(_release("99.0.0"))
+    assert "Update available: v99.0.0" in window.version_button.text()
+    assert "E67E22" in window.version_button.styleSheet()
+    window.show_update_state(_release(jebao_gui.__version__))
+    assert window.version_button.text() == f"v{jebao_gui.__version__}"
+    assert window.version_button.styleSheet() == ""
+    window.show_update_state(LookupError("Couldn't reach GitHub."))
+    assert "Couldn't reach GitHub" in window.version_button.toolTip()
+
+
+def test_clicking_outdated_version_offers_the_update(window, monkeypatch):
+    offered = []
+
+    class FakeBox:
+        def _offer(self, release):
+            offered.append(release.version)
+
+        def check(self):
+            offered.append("check")
+
+    class FakeDialog:
+        app_box = FakeBox()
+
+    monkeypatch.setattr(window, "open_settings", lambda then=None: then(FakeDialog()))
+    window.on_version_clicked()
+    window.show_update_state(_release("99.0.0"))
+    window.on_version_clicked()
+    assert offered == ["check", "99.0.0"]
+
+
+def test_manual_check_also_updates_the_label(window, monkeypatch):
+    box = jebao_gui.AppBox(window)
+    monkeypatch.setattr(box, "_offer", lambda release: None)  # don't open the dialog
+    box._checked(_release("99.0.0"))
+    assert "Update available" in window.version_button.text()
+
+
+def test_desktop_shortcut_made_on_first_launch_and_after_updates(window, monkeypatch):
+    made = []
+    monkeypatch.setattr(
+        jebao_gui.shortcut, "create_shortcut", lambda version="": made.append(version) or "/D/J.app"
+    )
+    monkeypatch.setattr(window, "_run_in_background", lambda fn, done: done(fn(None)))
+
+    window.maintain_desktop_shortcut()  # first launch
+    assert made == [jebao_gui.__version__]
+    state = jebao_gui.shortcut.load_state(jebao_gui.APP_DIR)
+    assert state["version"] == jebao_gui.__version__ and state["path"] == "/D/J.app"
+
+    window.maintain_desktop_shortcut()  # same version: nothing to do
+    assert len(made) == 1
+
+    jebao_gui.shortcut.save_state(jebao_gui.APP_DIR, {**state, "version": "0.9.0"})  # as if just updated
+    window.maintain_desktop_shortcut()
+    assert len(made) == 2
+
+
+def test_automatic_shortcut_can_be_turned_off(window, monkeypatch):
+    monkeypatch.setattr(
+        jebao_gui.shortcut, "create_shortcut", lambda version="": pytest.fail("must not create")
+    )
+    box = jebao_gui.AppBox(window)
+    assert box.chk_auto_shortcut.isChecked()
+    box.chk_auto_shortcut.setChecked(False)
+    assert jebao_gui.shortcut.load_state(jebao_gui.APP_DIR)["auto"] is False
+    window.maintain_desktop_shortcut()
+
+
+def test_failed_automatic_shortcut_is_logged_and_retried_next_launch(window, caplog):
+    with caplog.at_level("WARNING", logger="JebaoGUI"):
+        window._shortcut_done(RuntimeError("no desktop"), first=True)
+    assert "no desktop" in caplog.text
+    assert jebao_gui.shortcut.load_state(jebao_gui.APP_DIR) == {}
