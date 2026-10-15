@@ -1827,8 +1827,8 @@ class JebaoPumpGUI(QMainWindow):
             else:
                 try:
                     channels = [int(ch_cb.currentText())]
-                except:  # noqa: E722, S110 (kept as-is; see CHANGELOG "Known issues")
-                    pass
+                except (AttributeError, TypeError, ValueError) as e:
+                    logger.warning(f"Step {r + 1}: couldn't read the channel ({e}); using channel 1.")
 
             seq.append(
                 {

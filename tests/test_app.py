@@ -160,3 +160,16 @@ def test_emergency_stop_with_no_pumps_says_so(window, qt_loop, caplog):
         r.name == "JebaoGUI" and r.levelname == "ERROR" and "STOP not sent" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_unreadable_channel_is_logged_not_hidden(window, caplog):
+    from PyQt6.QtWidgets import QComboBox
+
+    window.add_sequence_step("Dose")
+    bad = QComboBox()
+    bad.addItem("not a channel")
+    window.seq_table.setCellWidget(0, 1, bad)
+    with caplog.at_level("WARNING", logger="JebaoGUI"):
+        steps = window._get_sequence_data()
+    assert steps[0]["channel"] == [1]
+    assert any("couldn't read the channel" in r.getMessage() for r in caplog.records)
