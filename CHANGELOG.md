@@ -4,6 +4,16 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-15
+
+### Added
+- **Check for Updates** in Settings: looks for a newer release on GitHub and can update and restart the app. It only moves to published releases, never over your own changes, reinstalls dependencies only when they changed (and goes back if that fails), and won't update while a sequence, dose or calibration is running.
+- **Create Desktop Shortcut** in Settings: a desktop icon that starts the app (a shortcut without a console window on Windows, a small app you can put in the Dock on a Mac, a launcher on Linux).
+- An app icon, shown in the window, the Dock and the Windows taskbar.
+
+### Fixed
+- The Settings dialog opens tall enough that its explanations aren't cut off.
+
 ## [1.1.0] - 2026-10-15
 
 First tracked release. Version 1.0.0 is the app as it was already being used in the lab; this release fixes three bugs and tidies up the project around it. Earlier versions were co-developed with Google Gemini in Antigravity; development continues with Claude (Anthropic).
@@ -36,6 +46,7 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/releases/tag/v1.0.0
