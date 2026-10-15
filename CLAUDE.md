@@ -19,7 +19,7 @@ PyQt6 app that drives Jebao MD-4.4 / Doser 2.4 4-channel dosing pumps (5 pumps, 
 ## History and open work
 - Jun 2026: the original spec (now in SyncThing `Jebao Pump/Archive/Removed from repo 2026-10-15/`) was a local UDP/TCP app using `python-jebao` + `qasync`. It was superseded by the cloud refactor on 26 Jun 2026.
 - Jul 2026: UI layout, async handling and user-review flow updates.
-- 15 Oct 2026: repo modernized per the playbook (pyproject, ruff, tests, CI, README, CHANGELOG, v0.1.0). History was rewritten to use the noreply email and drop personal paths; a pre-rewrite bundle is in SyncThing `Jebao Pump/Archive/`. Known bugs are listed in CHANGELOG "Known issues".
+- 15 Oct 2026: repo modernized per the playbook (pyproject, ruff, tests, CI, README, CHANGELOG). Released as v1.1.0; v1.0.0 tags the last commit before the modernization. History was rewritten to use the noreply email and drop personal paths; a pre-rewrite bundle is in SyncThing `Jebao Pump/Archive/`. The three bugs found in the audit were fixed in 1.1.0.
 - Open: **Wi-Fi provisioning reverse engineering** (`docs/provisioning-research.md`). The goal is to bulk-provision factory-reset pumps without the phone app. The likely protocol is ESPTouch/SmartConfig: capture the Jebao Aqua app's traffic with Wireshark on the Mac, then write `jebao_provisioner.py`.
 - Reference material is kept out of this public repo, in SyncThing: `UAkron Playground/Jebao Pump/Reference/` holds the Jebao manual (`Manuals, Refs/`) and the third-party reference repos and test scripts (`archive_tests_scripts/`). Don't modify them, and don't copy them back into the repo.
 

@@ -86,7 +86,7 @@ A dose of *V* mL turns the channel on, waits *V ÷ flow rate* minutes, then turn
 - **If the app or the internet stops mid-dose, the pump can keep running**, because the off command never arrives. Stop it with the pump's own button or the phone app.
 - **No local control.** If the Jebao cloud is down, the app can't reach the pumps.
 - **Adding new pumps to Wi-Fi** still needs the phone app. See [`docs/provisioning-research.md`](docs/provisioning-research.md) for the plan to automate it.
-- Known issues are listed in the [CHANGELOG](CHANGELOG.md).
+- Changes and fixes for each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Development
 
