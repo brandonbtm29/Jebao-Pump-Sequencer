@@ -1778,12 +1778,22 @@ class JebaoPumpGUI(QMainWindow):
         tasks = []
         # Stop all channels on all cloud devices
         attrs = {"channe1": False, "channe2": False, "channe3": False, "channe4": False}
-        for d in self.cloud_devices:
-            did = d.get("did")
+        dids = [d.get("did") for d in self.cloud_devices]
+        if not dids:
+            logger.error("STOP not sent: no pumps are listed. Stop the pumps by hand or with the phone app.")
+            return
+        for did in dids:
             tasks.append(self.send_cloud_command(did, attrs))
 
-        await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info("Sent STOP command to all channels across all pumps.")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failed = [self.get_device_name(did) for did, ok in zip(dids, results, strict=True) if ok is not True]
+        if failed:
+            logger.error(
+                f"STOP FAILED for {len(failed)} of {len(dids)} pump(s): {', '.join(failed)}. "
+                "Stop them by hand or with the phone app, or press Emergency Stop again."
+            )
+        else:
+            logger.info(f"Sent STOP command to all channels on all {len(dids)} pump(s).")
 
     # --- Sequence Persistence ---
     def _get_sequence_data(self):

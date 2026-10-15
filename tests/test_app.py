@@ -127,3 +127,36 @@ def test_a_stalled_request_fails_instead_of_hanging(window, qt_loop, monkeypatch
     monkeypatch.setattr(jebao_gui.requests, "post", timed_out)
     window.cloud_token = "token-123"  # noqa: S105 (fake token)
     assert loop.run_until_complete(window.send_cloud_command("DID42", {"channe1": False})) is False
+
+
+def test_emergency_stop_reports_pumps_it_could_not_stop(window, qt_loop, monkeypatch, caplog):
+    _, loop = qt_loop
+
+    async def fake_send(did, attrs):
+        if did == "B":
+            raise RuntimeError("network down")
+        return did != "C"
+
+    monkeypatch.setattr(window, "send_cloud_command", fake_send)
+    window.cloud_devices = [
+        {"did": "A", "dev_alias": "JP 1"},
+        {"did": "B", "dev_alias": "JP 2"},
+        {"did": "C", "dev_alias": "JP 3"},
+    ]
+    with caplog.at_level("INFO", logger="JebaoGUI"):
+        loop.run_until_complete(window._async_stop_all())
+    errors = [r.getMessage() for r in caplog.records if r.name == "JebaoGUI" and r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "2 of 3" in errors[0] and "JP 2" in errors[0] and "JP 3" in errors[0]
+    assert "JP 1" not in errors[0]
+
+
+def test_emergency_stop_with_no_pumps_says_so(window, qt_loop, caplog):
+    _, loop = qt_loop
+    window.cloud_devices = []
+    with caplog.at_level("INFO", logger="JebaoGUI"):
+        loop.run_until_complete(window._async_stop_all())
+    assert any(
+        r.name == "JebaoGUI" and r.levelname == "ERROR" and "STOP not sent" in r.getMessage()
+        for r in caplog.records
+    )
