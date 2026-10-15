@@ -3,6 +3,8 @@
 import importlib.metadata
 import json
 
+import pytest
+
 import jebao_gui
 
 
@@ -185,3 +187,86 @@ def test_icon_files_exist_and_load(qt_loop):
     app, _ = qt_loop
     jebao_gui.set_app_icon(app)
     assert not app.windowIcon().isNull()
+
+
+# --- Settings: App box (updates and desktop shortcut) ---------------------------------------
+
+
+def test_settings_has_update_and_shortcut_buttons(window):
+    dlg = jebao_gui.SettingsDialog(window.secrets, window.config, window)
+    box = dlg.app_box
+    assert box.btn_check.text() == "Check for Updates"
+    assert box.btn_shortcut.text() == "Create Desktop Shortcut"
+    assert box.main_window is window
+    dlg.reject()
+
+
+def test_busy_reason_blocks_updates_while_pumping(window):
+    assert window.busy_reason() == ""
+    window.sequence_queue.append({"name": "x", "data": []})
+    assert "sequence" in window.busy_reason()
+    window.sequence_queue.clear()
+    window._motor_jobs = 1
+    assert "dose" in window.busy_reason()
+    window._motor_jobs = 0
+
+
+def test_manual_dose_counts_as_busy_until_done(window, qt_loop, monkeypatch):
+    _, loop = qt_loop
+    seen = []
+
+    async def fake_send(did, attrs):
+        seen.append(window._motor_jobs)
+        return True
+
+    monkeypatch.setattr(window, "send_cloud_command", fake_send)
+    loop.run_until_complete(window._async_dose("A", 1, 0.0, "Time (s)"))
+    assert seen == [1, 1]  # busy while the motor command was sent
+    assert window._motor_jobs == 0
+
+
+def test_check_result_messages(window):
+    box = jebao_gui.AppBox(window)
+    same = jebao_gui.updater.Release(jebao_gui.__version__, "v" + jebao_gui.__version__, "", "", "")
+    box._checked(same)
+    assert "latest version" in box.lbl_status.text()
+    box._checked(LookupError("Couldn't reach GitHub. Check the internet connection."))
+    assert "Couldn't reach GitHub" in box.lbl_status.text()
+    assert box.btn_check.isEnabled()
+
+
+def test_update_refused_while_busy(window, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(jebao_gui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(jebao_gui.updater, "update_to", lambda *a, **k: pytest.fail("must not update"))
+    box = jebao_gui.AppBox(window)
+    window._motor_jobs = 1
+    box._update(jebao_gui.updater.Release("9.0.0", "v9.0.0", "", "", ""))
+    window._motor_jobs = 0
+    assert warnings and "Emergency Stop" in warnings[0]
+
+
+def test_successful_update_restarts(window, monkeypatch):
+    restarted = []
+    monkeypatch.setattr(jebao_gui.QMessageBox, "information", lambda *a: None)
+    monkeypatch.setattr(window, "restart_app", lambda: restarted.append(True))
+    box = jebao_gui.AppBox(window)
+    box._updated(jebao_gui.updater.UpdateResult(True, "Updated to v9.0.0."))
+    assert restarted == [True]
+
+
+def test_failed_update_shows_why(window, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(jebao_gui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(window, "restart_app", lambda: pytest.fail("must not restart"))
+    box = jebao_gui.AppBox(window)
+    box._updated(jebao_gui.updater.UpdateResult(False, "Couldn't download the update"))
+    assert warnings == ["Couldn't download the update"]
+
+
+def test_shortcut_button(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(jebao_gui.shortcut, "create_shortcut", lambda version="": "/Desktop/Jebao.app")
+    monkeypatch.setattr(jebao_gui.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    jebao_gui.AppBox(window).create_shortcut()
+    assert shown == ["Created:\n/Desktop/Jebao.app"]

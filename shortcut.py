@@ -54,13 +54,13 @@ def desktop_folder(platform=sys.platform):
     return path
 
 
-def create_shortcut(desktop=None, platform=sys.platform):
+def create_shortcut(desktop=None, platform=sys.platform, version=""):
     """Create (or replace) the desktop shortcut and return its path."""
     desktop = desktop or desktop_folder(platform)
     if platform == "win32":
         return _create_windows(desktop)
     if platform == "darwin":
-        return _create_mac(desktop)
+        return _create_mac(desktop, version)
     return _create_linux(desktop)
 
 

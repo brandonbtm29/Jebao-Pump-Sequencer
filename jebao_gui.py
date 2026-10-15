@@ -25,6 +25,8 @@ os.chdir(DATA_DIR)
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import settings_location
+import shortcut
+import updater
 
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
@@ -39,8 +41,8 @@ from datetime import datetime
 
 import qasync
 import requests
-from PyQt6.QtCore import QEvent, Qt, QTimer
-from PyQt6.QtGui import QColor, QIcon, QPalette, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -62,6 +64,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -280,11 +283,182 @@ def apply_global_theme(app, config):
         app.setPalette(app.style().standardPalette())
 
 
+class _Task(QThread):
+    """Run one slow function (network, git, pip) off the GUI thread."""
+
+    done = pyqtSignal(object)
+    progress = pyqtSignal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self._fn(self.progress.emit))
+        except LookupError as e:  # an expected problem with a plain message (offline, no releases)
+            logger.info(f"Update check: {e}")
+            self.done.emit(e)
+        except Exception as e:  # handed back to the GUI thread and shown there
+            logger.error(f"Update task failed: {e}")
+            self.done.emit(e)
+
+
+class AppBox(QGroupBox):
+    """The "App" box in Settings: version, Check for Updates, and Create Desktop Shortcut."""
+
+    def __init__(self, main_window=None, parent=None):
+        super().__init__("App", parent)
+        self.main_window = main_window
+        self._task = None
+        self._progress = None
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"You are running Jebao Pump Sequencer <b>{__version__}</b>."))
+        self.lbl_status = QLabel("Checks GitHub for a newer release only when you press the button.")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.lbl_status)
+        row = QHBoxLayout()
+        self.btn_check = QPushButton("Check for Updates")
+        self.btn_check.clicked.connect(self.check)
+        btn_page = QPushButton("Open Release Page")
+        btn_page.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE)))
+        row.addWidget(self.btn_check)
+        row.addWidget(btn_page)
+        lay.addLayout(row)
+
+        where = {
+            "win32": "a shortcut on your desktop that opens the app without a console window",
+            "darwin": "a Jebao Pump Sequencer app on your desktop (drag it to the Dock or Applications if you like)",
+        }.get(sys.platform, "a launcher on your desktop")
+        info = QLabel(
+            f"Create Desktop Shortcut makes {where}. It starts this copy of the app, so it keeps "
+            "working after updates. Pressing it again replaces the old shortcut."
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        self.btn_shortcut = QPushButton("Create Desktop Shortcut")
+        self.btn_shortcut.clicked.connect(self.create_shortcut)
+        lay.addWidget(self.btn_shortcut)
+
+    # --- desktop shortcut ----------------------------------------------------------------
+
+    def create_shortcut(self):
+        try:
+            path = shortcut.create_shortcut(version=__version__)
+        except shortcut.ShortcutError as e:
+            logger.warning(f"Desktop shortcut: {e}")
+            QMessageBox.warning(self, "Desktop Shortcut", str(e))
+            return
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            logger.error(f"Couldn't create the desktop shortcut: {e}")
+            QMessageBox.warning(self, "Desktop Shortcut", f"Couldn't create the shortcut:\n{e}")
+            return
+        logger.info(f"Created desktop shortcut {path}")
+        QMessageBox.information(self, "Desktop Shortcut", f"Created:\n{path}")
+
+    # --- checking for updates ------------------------------------------------------------
+
+    def _busy_reason(self):
+        busy = getattr(self.main_window, "busy_reason", None)
+        return busy() if busy else ""
+
+    def check(self):
+        self.btn_check.setEnabled(False)
+        self.lbl_status.setText("Checking GitHub…")
+        self._start(lambda _say: updater.latest_release(__version__), self._checked)
+
+    def _checked(self, result):
+        self.btn_check.setEnabled(True)
+        if isinstance(result, Exception):
+            msg = str(result) if isinstance(result, LookupError) else f"The check failed: {result}"
+            self.lbl_status.setText(msg)
+            return
+        release = result
+        if not updater.is_newer(release.version, __version__):
+            self.lbl_status.setText(f"You have the latest version ({__version__}).")
+            return
+        self.lbl_status.setText(f"Version {release.version} is available.")
+        self._offer(release)
+
+    def _offer(self, release):
+        ready = updater.update_readiness()
+        busy = self._busy_reason()
+        notes = release.notes.strip()
+        if len(notes) > 1500:
+            notes = notes[:1500].rsplit("\n", 1)[0] + "\n…"
+        box = QMessageBox(self)
+        box.setWindowTitle("Update available")
+        box.setText(f"<b>{release.name}</b> is available. You have {__version__}.")
+        box.setDetailedText(notes or "No release notes.")
+        btn_page = box.addButton("Open Release Page", QMessageBox.ButtonRole.HelpRole)
+        btn_update = None
+        if not ready.ok:
+            box.setInformativeText(ready.reason)
+        elif busy:
+            box.setInformativeText(busy)
+        else:
+            box.setInformativeText(
+                "Update now? The app saves your settings and sequence, downloads the new version "
+                "and restarts. You'll need to log in again only if your login isn't saved."
+            )
+            btn_update = box.addButton("Update and Restart", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_page:
+            QDesktopServices.openUrl(QUrl(release.url))
+        elif btn_update is not None and clicked is btn_update:
+            self._update(release)
+
+    # --- updating ------------------------------------------------------------------------
+
+    def _update(self, release):
+        busy = self._busy_reason()  # something may have started while the box was open
+        if busy:
+            QMessageBox.warning(self, "Update", busy)
+            return
+        save = getattr(self.main_window, "save_before_restart", None)
+        if save:
+            save()
+        self.btn_check.setEnabled(False)
+        self._progress = QProgressDialog("Starting…", None, 0, 0, self)
+        self._progress.setWindowTitle(f"Updating to {release.version}")
+        self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._progress.setMinimumDuration(0)
+        self._progress.show()
+        self._start(lambda say: updater.update_to(release.tag, progress=say), self._updated)
+
+    def _updated(self, result):
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        self.btn_check.setEnabled(True)
+        if isinstance(result, Exception):
+            result = updater.UpdateResult(False, f"The update failed: {result}")
+        if not result.ok:
+            self.lbl_status.setText("The update didn't finish. See the message for details.")
+            QMessageBox.warning(self, "Update", result.message)
+            return
+        self.lbl_status.setText(result.message + " Restarting…")
+        QMessageBox.information(self, "Update", result.message + "\n\nThe app will now restart.")
+        restart = getattr(self.main_window, "restart_app", None)
+        if restart:
+            restart()
+
+    def _start(self, fn, on_done):
+        self._task = _Task(fn, self)
+        self._task.done.connect(on_done)
+        if self._progress is not None:
+            self._task.progress.connect(self._progress.setLabelText)
+        self._task.start()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, secrets_manager, config_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(560, 300)
         self.secrets = secrets_manager
         self.config = config_manager
 
@@ -319,6 +493,8 @@ class SettingsDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.app_box = AppBox(parent, self)
+        layout.addRow(self.app_box)
         layout.addRow(
             settings_location.settings_folder_box(
                 APP_DIR,
@@ -329,6 +505,9 @@ class SettingsDialog(QDialog):
             )
         )
         layout.addRow(buttons)
+        # Tall enough for the wrapped explanations, instead of squashing them.
+        width = 560
+        self.resize(width, max(self.sizeHint().height(), layout.totalHeightForWidth(width)))
 
     def accept(self):
         self.secrets.data["username"] = self.user_input.text().strip()
@@ -370,6 +549,7 @@ class JebaoPumpGUI(QMainWindow):
 
         self.sequence_queue = []
         self.current_running_sequence = None
+        self._motor_jobs = 0  # manual doses and calibration runs in progress
 
         import asyncio
 
@@ -567,6 +747,28 @@ class JebaoPumpGUI(QMainWindow):
         dlg = SettingsDialog(self.secrets, self.config, self)
         if dlg.exec():
             asyncio.create_task(self.login_and_fetch())
+
+    def busy_reason(self):
+        """Why the app shouldn't restart right now, or '' if it can."""
+        task = getattr(self, "sequence_task", None)
+        running = task is not None and not task.done()
+        if running or self.current_running_sequence or self.sequence_queue:
+            return (
+                "A sequence is running or queued. Wait for it to finish, or press Emergency Stop, "
+                "before updating: restarting mid-dose can leave a pump running."
+            )
+        if self._motor_jobs:
+            return (
+                "A dose or calibration run is in progress. Wait for it to finish, or press Emergency "
+                "Stop, before updating: restarting mid-dose can leave a pump running."
+            )
+        return ""
+
+    def save_before_restart(self):
+        if hasattr(self, "seq_table"):
+            self.auto_save_sequence()
+        self.config.save()
+        self.secrets.save()
 
     def restart_app(self):
         logger.info("Restarting application...")
@@ -845,6 +1047,7 @@ class JebaoPumpGUI(QMainWindow):
         cmds = {f"channe{ch + 1}": True for ch in channels}
         off_cmds = {f"channe{ch + 1}": False for ch in channels}
         ch_str = ", ".join([str(ch + 1) for ch in channels])
+        self._motor_jobs += 1
         try:
             await self.send_cloud_command(did, cmds)
             logger.info(f"Calibration: Motors ON {ch_str}. Waiting 60 seconds...")
@@ -854,6 +1057,7 @@ class JebaoPumpGUI(QMainWindow):
         except Exception as e:
             logger.error(f"Calibration run failed: {e}")
         finally:
+            self._motor_jobs -= 1
             self.btn_cal_run.setEnabled(True)
 
     def save_calibration(self):
@@ -1170,6 +1374,7 @@ class JebaoPumpGUI(QMainWindow):
         asyncio.create_task(self._async_dose(did, channel, value, unit))
 
     async def _async_dose(self, did, channel, value, unit):
+        self._motor_jobs += 1
         try:
             if unit == "Time (s)":
                 seconds = value
@@ -1190,6 +1395,8 @@ class JebaoPumpGUI(QMainWindow):
             logger.warning(f"Manual Dose on CH{channel} was cancelled.")
         except Exception as e:
             logger.error(f"Dose error: {e}")
+        finally:
+            self._motor_jobs -= 1
 
     def add_sequence_step(self, action_type):
         row = self.seq_table.rowCount()
