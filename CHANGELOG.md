@@ -4,6 +4,15 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-15
+
+### Added
+- The version is shown in the bottom-right corner. Each time the app starts it checks GitHub, and if a newer release is out the version turns orange ("Update available"); click it to update.
+- The desktop shortcut is made automatically the first time the app starts and refreshed (icon and target) after each update. A checkbox in Settings turns this off.
+
+### Changed
+- The launchers (`Launch_Windows.bat`, `Launch_Mac.command`) close their console or Terminal window once the app has started. If the app can't start, the window stays open and says why.
+
 ## [1.2.0] - 2026-10-15
 
 ### Added
@@ -46,7 +55,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/releases/tag/v1.0.0

@@ -1,6 +1,6 @@
 """Jebao Pump Sequencer: PyQt6 app that drives Jebao dosing pumps through the Gizwits cloud API."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import os
 import sys
@@ -314,7 +314,7 @@ class AppBox(QGroupBox):
         self._progress = None
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"You are running Jebao Pump Sequencer <b>{__version__}</b>."))
-        self.lbl_status = QLabel("Checks GitHub for a newer release only when you press the button.")
+        self.lbl_status = QLabel("The app checks GitHub for a newer release each time it starts, or now with this button.")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.lbl_status)
