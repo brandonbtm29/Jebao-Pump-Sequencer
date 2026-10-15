@@ -5,7 +5,7 @@ PyQt6 desktop app for Jebao MD-4.4 / Doser 2.4 four-channel dosing pumps. It tal
 ## Setup
 ```
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt      # Windows: .venv\Scripts\pip install -r requirements.txt
+.venv/bin/pip install -e .      # Windows: .venv\Scripts\pip install -e .
 python jebao_gui.py                             # or double-click Launch_Mac.command / Launch_Windows.bat
 ```
 Open **Settings**, enter your Jebao account, and the app lists the pumps bound to it.
