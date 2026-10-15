@@ -106,6 +106,9 @@ class GUILogHandler(logging.Handler):
 # --- Cloud API Configuration ---
 APP_ID = "c3703c4888ec4736a3a0d9425c321604"
 DOMAIN = "usapi.gizwits.com"
+# Seconds to wait for the cloud before giving up on a request, so a stalled
+# connection can't hold up a dose or the emergency stop indefinitely.
+REQUEST_TIMEOUT = 10
 
 
 class SecretsManager:
@@ -991,7 +994,9 @@ class JebaoPumpGUI(QMainWindow):
         data = {"username": user, "password": pw}
 
         try:
-            resp = await asyncio.to_thread(requests.post, url, headers=headers, json=data)
+            resp = await asyncio.to_thread(
+                requests.post, url, headers=headers, json=data, timeout=REQUEST_TIMEOUT
+            )
             if resp.status_code == 200:
                 self.cloud_token = resp.json().get("token")
                 logger.info("Login successful. Fetching devices...")
@@ -1012,7 +1017,7 @@ class JebaoPumpGUI(QMainWindow):
         url = f"https://{DOMAIN}/app/bindings"
         headers = {"X-Gizwits-Application-Id": APP_ID, "X-Gizwits-User-token": self.cloud_token}
         try:
-            resp = await asyncio.to_thread(requests.get, url, headers=headers)
+            resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 self.cloud_devices = resp.json().get("devices", [])
                 logger.info(f"Found {len(self.cloud_devices)} bound devices.")
@@ -1035,7 +1040,9 @@ class JebaoPumpGUI(QMainWindow):
         }
         data = {"attrs": attrs}
         try:
-            resp = await asyncio.to_thread(requests.post, url, headers=headers, json=data)
+            resp = await asyncio.to_thread(
+                requests.post, url, headers=headers, json=data, timeout=REQUEST_TIMEOUT
+            )
             if resp.status_code == 200:
                 return True
             else:

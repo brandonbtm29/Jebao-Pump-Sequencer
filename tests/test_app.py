@@ -102,3 +102,28 @@ def test_emergency_stop_turns_off_every_channel_on_every_pump(window, qt_loop, m
     loop.run_until_complete(window._async_stop_all())
     off = {"channe1": False, "channe2": False, "channe3": False, "channe4": False}
     assert sorted(sent, key=lambda s: s[0]) == [("A", off), ("B", off)]
+
+
+def test_cloud_requests_have_a_timeout(window, qt_loop, monkeypatch):
+    _, loop = qt_loop
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(jebao_gui.requests, "post", fake_post)
+    window.cloud_token = "token-123"  # noqa: S105 (fake token)
+    loop.run_until_complete(window.send_cloud_command("DID42", {"channe1": False}))
+    assert seen["timeout"] == jebao_gui.REQUEST_TIMEOUT > 0
+
+
+def test_a_stalled_request_fails_instead_of_hanging(window, qt_loop, monkeypatch):
+    _, loop = qt_loop
+
+    def timed_out(*args, **kwargs):
+        raise jebao_gui.requests.Timeout("no answer")
+
+    monkeypatch.setattr(jebao_gui.requests, "post", timed_out)
+    window.cloud_token = "token-123"  # noqa: S105 (fake token)
+    assert loop.run_until_complete(window.send_cloud_command("DID42", {"channe1": False})) is False
