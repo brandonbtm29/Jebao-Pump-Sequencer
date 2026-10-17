@@ -18,6 +18,9 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **User review steps**: a sequence can stop and wait until you click **Approve** for that channel.
 - **Emergency stop**: one button cancels the running sequence, clears the queue and turns off all four channels on every pump.
 - **Shared settings**: keep your login, calibrations and sequences in a synced folder so every computer uses the same ones.
+- **System log that's kept**: everything the app does is logged and saved on each computer for 30 days (adjustable in Settings). When you open the app, recent history is shown again above the new session.
+- **Review steps you can't miss**: when a sequence waits for your review, an orange bar appears across the top with an Approve button for each waiting channel.
+- **Pump order**: drag pumps in the list into your own order, or press **Sort A→Z** (JP 2 comes before JP 10).
 - **Version and updates**: the version is shown in the bottom-right corner. When a newer release is out it turns orange ("Update available"); click it to see what changed and update. It won't update while a sequence, dose or calibration is running.
 - **Desktop shortcut**: the app puts an icon on your desktop the first time it starts and refreshes it after each update. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock. You can turn this off in Settings.
 
@@ -85,7 +88,9 @@ The app keeps two settings files:
 You don't need to write either file yourself. The app creates them when you save settings.
 
 - **Where they live:** by default in the app folder. Both are listed in `.gitignore`, so they never get committed. **Settings → Settings Folder** can move them. A folder inside a synced drive (SyncThing, OneDrive…) shares them between computers. The choice is stored in `settings_location.json`, and the `UAKRON_SETTINGS_DIR` environment variable overrides it.
-- **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump` and writes errors (with tracebacks) to `logs/jebao_pump_sequencer.log` there; an unexpected error is shown in a dialog instead of closing the app. Set `UAKRON_APP_DATA_DIR` to use a different folder. The app creates the folder if it is missing. The event log is shown in the window but not saved to a file.
+- **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump`. Set `UAKRON_APP_DATA_DIR` to use a different folder; the app creates it if it is missing. Its `logs/` folder holds two kinds of log:
+  - the **system log** you see in the window, one file per day per computer (`events-YYYY-MM-DD-<computer>.log`), kept for 30 days by default. **Open Log Folder** in the log box opens it.
+  - the **error log**, `jebao_pump_sequencer.log`, with tracebacks of errors. An unexpected error is shown in a dialog instead of closing the app.
 
 ## How it works
 
