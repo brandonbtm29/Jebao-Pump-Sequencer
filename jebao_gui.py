@@ -43,7 +43,7 @@ from datetime import datetime
 
 import qasync
 import requests
-from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -101,22 +101,40 @@ def natural_key(text):
     ]
 
 
-class GUILogHandler(logging.Handler):
+class _LogBridge(QObject):
+    """Carries log lines to the GUI thread. A Qt signal emitted from a background
+    thread is delivered on the thread this object lives in (the GUI thread)."""
+
+    line = pyqtSignal(str)
+
     def __init__(self, text_widget):
         super().__init__()
         self.text_widget = text_widget
+        self.line.connect(self.append)
 
-    def emit(self, record):
-        msg = self.format(record)
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.call_soon_threadsafe(self.append_text, msg)
-        else:
-            self.append_text(msg)
-
-    def append_text(self, msg):
+    @pyqtSlot(str)
+    def append(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.text_widget.append(f"[{timestamp}] {msg}")
+
+
+class GUILogHandler(logging.Handler):
+    """Show log records in the window's log box. Safe to log from any thread."""
+
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+        self._bridge = _LogBridge(text_widget)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self._bridge.line.emit(msg)
+        except Exception:
+            self.handleError(record)
+
+    def append_text(self, msg):
+        self._bridge.append(msg)
 
 
 # --- Cloud API Configuration ---

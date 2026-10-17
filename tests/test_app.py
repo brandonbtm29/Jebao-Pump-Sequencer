@@ -421,3 +421,44 @@ def test_restart_lives_in_settings_and_clock_in_status_bar(window):
     texts = [b.text() for b in dlg.app_box.findChildren(jebao_gui.QPushButton)]
     assert "Restart App" in texts
     dlg.reject()
+
+
+def test_logging_from_a_background_thread_is_safe(window, qt_loop):
+    """Logging from a worker thread (e.g. a failed update check) used to raise
+    'There is no current event loop in thread' and could stop the app."""
+    import threading
+
+    from PyQt6.QtCore import QCoreApplication
+
+    errors = []
+    t = threading.Thread(target=lambda: _log_or_record(errors), name="worker")
+    t.start()
+    t.join(5)
+    for _ in range(20):
+        QCoreApplication.processEvents()
+    assert errors == []
+    assert "hello from a worker thread" in window.log_text.toPlainText()
+
+
+def _log_or_record(errors):
+    try:
+        jebao_gui.logger.info("hello from a worker thread")
+    except Exception as e:  # noqa: BLE001 - the test records any failure
+        errors.append(e)
+
+
+def test_failed_update_check_in_a_qthread_reaches_the_label(window, qt_loop, monkeypatch):
+    from PyQt6.QtCore import QCoreApplication
+
+    def offline(_version):
+        raise LookupError("Couldn't reach GitHub. Check the internet connection.")
+
+    monkeypatch.setattr(jebao_gui.updater, "latest_release", offline)
+    task = window._run_in_background(
+        lambda _say: jebao_gui.updater.latest_release("x"), window.show_update_state
+    )
+    assert task.wait(5000)
+    for _ in range(20):
+        QCoreApplication.processEvents()
+    assert "Couldn't reach GitHub" in window.version_button.toolTip()
+    assert "Update check: Couldn't reach GitHub" in window.log_text.toPlainText()
