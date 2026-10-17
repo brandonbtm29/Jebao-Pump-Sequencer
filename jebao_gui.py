@@ -75,10 +75,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# Errors (with tracebacks, also from background threads) go to logs/jebao_pump_sequencer.log
-# in the data folder; an uncaught error is shown in a dialog instead of closing the app.
-crash_log.setup("jebao_pump_sequencer", os.path.join(DATA_DIR, "logs"), __version__)
-
 logger = logging.getLogger("JebaoGUI")
 logger.setLevel(logging.DEBUG)
 
@@ -2247,6 +2243,9 @@ def set_app_icon(app):
 
 
 def main():
+    # Errors (with tracebacks, also from background threads) go to logs/jebao_pump_sequencer.log
+    # in the data folder; an uncaught error is shown in a dialog instead of closing the app.
+    crash_log.setup("jebao_pump_sequencer", os.path.join(DATA_DIR, "logs"), __version__)
     app = QApplication(sys.argv)
     set_app_icon(app)
 

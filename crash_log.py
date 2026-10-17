@@ -105,7 +105,8 @@ def _install_hooks(name, qt_dialog):
             sys.__excepthook__(exc_type, exc, tb)
             return
         log.critical("Unexpected error", exc_info=(exc_type, exc, tb))
-        if qt_dialog:
+        # No dialog without a screen (QT_QPA_PLATFORM=offscreen in tests/CI): nobody could close it.
+        if qt_dialog and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
             if time.monotonic() - last_shown[0] < 60:  # an error in a timer would repeat every tick
                 return
             last_shown[0] = time.monotonic()
