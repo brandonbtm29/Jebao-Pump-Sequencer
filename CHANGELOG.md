@@ -4,11 +4,23 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-17
+
 ### Added
+- The system log is saved on each computer (one file per day in the data folder's `logs/`) and kept for 30 days; the number of days is a setting. When the app opens, recent history is shown again above the new session. **Open Log Folder** opens it.
 - **Error log**: errors, with tracebacks (also from background threads), go to `logs/jebao_pump_sequencer.log`
   in the data folder (replaces `crash_log.txt`, which only kept the last crash). An unexpected error is
   shown in a dialog and the app keeps running instead of closing.
 - `Setup_Windows.bat` / `Setup_Mac.command`: one double-click creates the `.venv` and installs everything.
+- **Sort A→Z** for the pump list, with numbers in order (JP 2 before JP 10). Dragging still sets your own order.
+
+### Changed
+- A step waiting for review shows an orange bar across the top, with an Approve button for each waiting channel, instead of the Pending Approvals block in the sidebar.
+- The clock moved to the status bar, next to the version.
+- The Restart button moved from the main window to Settings → App. Updates and the Settings Folder option still restart the app by themselves.
+
+### Fixed
+- When the update check at startup couldn't reach GitHub (offline, or GitHub limiting requests), writing that to the log raised an error, so the version label never showed the result. Logging from background work is now safe.
 
 ## [1.3.0] - 2026-10-15
 
@@ -61,7 +73,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.0.0...v1.1.0
