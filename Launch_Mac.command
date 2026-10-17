@@ -17,7 +17,7 @@ if ! "$PY" -c "import PyQt6.QtWidgets, qasync, requests" 2>/dev/null; then
 fi
 
 # Start the app in its own session, detached from this window, so closing the
-# window doesn't stop it. Errors after this point go to crash_log.txt in the data folder.
+# window doesn't stop it. Errors after this point go to logs/jebao_pump_sequencer.log in the data folder.
 "$PY" -c 'import subprocess, sys; subprocess.Popen([sys.executable, "jebao_gui.py"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)'
 
 # Close this Terminal window once this script has exited.

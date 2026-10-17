@@ -19,6 +19,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem pythonw runs the app without a console; errors from here on go to crash_log.txt in the data folder.
+rem pythonw runs the app without a console; errors from here on go to logs\jebao_pump_sequencer.log in the data folder.
 start "" "%PYW%" jebao_gui.py
 exit /b 0
