@@ -379,3 +379,45 @@ def test_log_retention_is_a_setting(window, monkeypatch):
     dlg.log_days_spin.setValue(45)
     dlg.accept()
     assert window.config.data["log_keep_days"] == 45 and pruned == [45]
+
+
+# --- quick wins: approvals banner, sorting, no Restart button, clock --------------------------
+
+
+def test_approval_banner_only_while_waiting(window):
+    import asyncio
+
+    assert window.approval_banner.isHidden()
+    window.current_running_sequence = "Load sample"
+    window._ch_review_events[1] = asyncio.Event()
+    window._ch_review_events[3] = asyncio.Event()
+    window.refresh_approval_banner()
+    assert not window.approval_banner.isHidden()
+    assert "CH1, CH3" in window.lbl_approval.text() and "Load sample" in window.lbl_approval.text()
+    assert not window.btn_approve_channels[0].isHidden() and window.btn_approve_channels[1].isHidden()
+    window.approve_all()
+    assert window._ch_review_events[1] is None and window.approval_banner.isHidden()
+
+
+def test_natural_sort_key():
+    names = ["JP 10: Sample", "JP 2: Water", "jp 1: EtOH", "JP 1b"]
+    assert sorted(names, key=jebao_gui.natural_key) == ["jp 1: EtOH", "JP 1b", "JP 2: Water", "JP 10: Sample"]
+
+
+def test_sort_pumps_by_name(window):
+    window.cloud_devices = [
+        {"did": d, "dev_alias": n} for d, n in [("c", "JP 10"), ("a", "JP 2"), ("b", "JP 1")]
+    ]
+    window.populate_sidebar()
+    window.sort_pumps_by_name()
+    assert window.config.data["pump_order"] == ["b", "a", "c"]
+    assert [window.pump_list.item(i).text().split(" (")[0] for i in range(3)] == ["JP 1", "JP 2", "JP 10"]
+
+
+def test_restart_lives_in_settings_and_clock_in_status_bar(window):
+    assert not hasattr(window, "btn_restart")
+    assert window.statusBar().isAncestorOf(window.lbl_clock)
+    dlg = jebao_gui.SettingsDialog(window.secrets, window.config, window)
+    texts = [b.text() for b in dlg.app_box.findChildren(jebao_gui.QPushButton)]
+    assert "Restart App" in texts
+    dlg.reject()

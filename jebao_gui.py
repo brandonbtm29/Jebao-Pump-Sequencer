@@ -36,6 +36,7 @@ SETTINGS_FILES = ["jebao_config.json", "secrets.json"]
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -85,6 +86,19 @@ crash_log.setup("jebao_pump_sequencer", os.path.join(DATA_DIR, "logs"), __versio
 
 logger = logging.getLogger("JebaoGUI")
 logger.setLevel(logging.DEBUG)
+
+
+APPROVE_STYLE = (
+    "QPushButton { background-color: #F08A24; color: #1D1205; font-weight: bold; padding: 6px 14px; }"
+)
+APPROVE_ALL_STYLE = "QPushButton { background-color: transparent; color: #FFE2C2; border: 1px solid #A8682A; padding: 6px 12px; }"
+
+
+def natural_key(text):
+    """Sort key that orders numbers by value: 'JP 2' comes before 'JP 10'."""
+    return [
+        (0, int(part), "") if part.isdigit() else (1, 0, part.lower()) for part in re.split(r"(\d+)", text)
+    ]
 
 
 class GUILogHandler(logging.Handler):
@@ -326,6 +340,10 @@ class AppBox(QGroupBox):
         btn_page.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE)))
         row.addWidget(self.btn_check)
         row.addWidget(btn_page)
+        btn_restart = QPushButton("Restart App")
+        btn_restart.setToolTip("Close and reopen the app (for troubleshooting).")
+        btn_restart.clicked.connect(self._restart)
+        row.addWidget(btn_restart)
         lay.addLayout(row)
 
         where = {
@@ -356,6 +374,15 @@ class AppBox(QGroupBox):
             shortcut.save_state(APP_DIR, state)
         except OSError as e:
             logger.warning(f"Couldn't save the desktop shortcut setting: {e}")
+
+    def _restart(self):
+        busy = self._busy_reason()
+        if busy:
+            QMessageBox.warning(self, "Restart", busy.replace("updating", "restarting"))
+            return
+        restart = getattr(self.main_window, "restart_app", None)
+        if restart:
+            restart()
 
     # --- desktop shortcut ----------------------------------------------------------------
 
@@ -615,11 +642,36 @@ class JebaoPumpGUI(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- HEADER (Clock) ---
+        # The clock lives in the status bar (see _build_status_bar).
         self.lbl_clock = QLabel()
-        self.lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_clock.setStyleSheet("font-size: 16px; font-weight: bold; padding: 5px;")
-        main_layout.addWidget(self.lbl_clock)
+
+        # --- Approval banner: shown only while a sequence step waits for review ---
+        self.approval_banner = QFrame()
+        self.approval_banner.setStyleSheet(
+            "QFrame { background-color: #4A2F12; border: 1px solid #8A5420; border-radius: 6px; }"
+            "QLabel { color: #FFE2C2; border: none; }"
+        )
+        banner_layout = QHBoxLayout(self.approval_banner)
+        banner_layout.setContentsMargins(12, 8, 12, 8)
+        self.lbl_approval = QLabel()
+        self.lbl_approval.setWordWrap(True)
+        banner_layout.addWidget(self.lbl_approval, 1)
+        self.btn_approve_channels = []
+        for i in range(4):
+            btn = QPushButton(f"Approve CH{i + 1}")
+            btn.setEnabled(False)
+            btn.setVisible(False)
+            btn.setStyleSheet(APPROVE_STYLE)
+            btn.clicked.connect(lambda checked, ch=i + 1: self.approve_channel(ch))
+            self.btn_approve_channels.append(btn)
+            banner_layout.addWidget(btn)
+        self.btn_approve_all = QPushButton("Approve All")
+        self.btn_approve_all.setEnabled(False)
+        self.btn_approve_all.setStyleSheet(APPROVE_ALL_STYLE)
+        self.btn_approve_all.clicked.connect(self.approve_all)
+        banner_layout.addWidget(self.btn_approve_all)
+        self.approval_banner.setVisible(False)
+        main_layout.addWidget(self.approval_banner)
 
         # --- TOP SPLITTER (Queue & Main UI) ---
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -661,27 +713,6 @@ class JebaoPumpGUI(QMainWindow):
         self.queue_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         seq_sidebar_layout.addWidget(self.queue_list)
 
-        # Pending Approvals Section
-        seq_sidebar_layout.addWidget(QLabel("<b>Pending Approvals</b>"))
-
-        appr_grid = QGridLayout()
-        self.btn_approve_channels = []
-        for i in range(4):
-            btn = QPushButton(f"Approve CH {i + 1}")
-            btn.setEnabled(False)
-            btn.setStyleSheet("background-color: #6C757D; color: white;")
-            btn.clicked.connect(lambda checked, ch=i + 1: self.approve_channel(ch))
-            self.btn_approve_channels.append(btn)
-            appr_grid.addWidget(btn, i // 2, i % 2)
-
-        seq_sidebar_layout.addLayout(appr_grid)
-
-        self.btn_approve_all = QPushButton("Approve All")
-        self.btn_approve_all.setEnabled(False)
-        self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
-        self.btn_approve_all.clicked.connect(self.approve_all)
-        seq_sidebar_layout.addWidget(self.btn_approve_all)
-
         top_splitter.addWidget(seq_sidebar)
 
         # 2. Center Panel: Tabs
@@ -721,7 +752,19 @@ class JebaoPumpGUI(QMainWindow):
 
         bl_layout.addLayout(bl_header)
 
+        sort_row = QHBoxLayout()
+        sort_hint = QLabel("Drag to reorder")
+        sort_hint.setStyleSheet("color: grey;")
+        sort_row.addWidget(sort_hint)
+        sort_row.addStretch(1)
+        self.btn_sort_pumps = QPushButton("Sort A→Z")
+        self.btn_sort_pumps.setToolTip("Sort pumps by name, with numbers in order (JP 2 before JP 10).")
+        self.btn_sort_pumps.clicked.connect(self.sort_pumps_by_name)
+        sort_row.addWidget(self.btn_sort_pumps)
+        bl_layout.addLayout(sort_row)
+
         self.pump_list = QListWidget()
+        self.pump_list.setToolTip("Drag pumps to put them in your own order.")
         self.pump_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.pump_list.model().rowsMoved.connect(self.save_pump_order)
         self.pump_list.currentItemChanged.connect(self.on_pump_selected)
@@ -737,9 +780,6 @@ class JebaoPumpGUI(QMainWindow):
         self.btn_refresh.clicked.connect(lambda: asyncio.create_task(self.login_and_fetch()))
         cloud_btn_layout.addWidget(self.btn_refresh)
 
-        self.btn_restart = QPushButton("🔄 Restart")
-        self.btn_restart.clicked.connect(self.restart_app)
-        cloud_btn_layout.addWidget(self.btn_restart)
         bl_layout.addLayout(cloud_btn_layout)
 
         bottom_splitter.addWidget(bottom_left)
@@ -819,6 +859,8 @@ class JebaoPumpGUI(QMainWindow):
         self.version_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.version_button.setToolTip("Jebao Pump Sequencer version. Click to check for updates.")
         self.version_button.clicked.connect(self.on_version_clicked)
+        self.lbl_clock.setStyleSheet("color: grey; padding-left: 6px;")
+        self.statusBar().addWidget(self.lbl_clock)
         self.statusBar().addPermanentWidget(self.version_button)
 
     def show_update_state(self, result):
@@ -940,17 +982,29 @@ class JebaoPumpGUI(QMainWindow):
         if self._ch_review_events.get(ch):
             self._ch_review_events[ch].set()
             self._ch_review_events[ch] = None
-            self.btn_approve_channels[ch - 1].setEnabled(False)
-            self.btn_approve_channels[ch - 1].setStyleSheet("background-color: #6C757D; color: white;")
-
-        # Check if any other channels are still waiting
-        if not any(self._ch_review_events.values()):
-            self.btn_approve_all.setEnabled(False)
-            self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
+        self.refresh_approval_banner()
 
     def approve_all(self):
         for ch in range(1, 5):
             self.approve_channel(ch)
+
+    def refresh_approval_banner(self):
+        """Show the orange banner while any channel waits for review, with a button per waiting channel."""
+        waiting = [ch for ch in range(1, 5) if self._ch_review_events.get(ch)]
+        for ch in range(1, 5):
+            btn = self.btn_approve_channels[ch - 1]
+            btn.setEnabled(ch in waiting)
+            btn.setVisible(ch in waiting)
+        self.btn_approve_all.setEnabled(bool(waiting))
+        self.btn_approve_all.setVisible(len(waiting) > 1)
+        if waiting:
+            chans = ", ".join(f"CH{ch}" for ch in waiting)
+            seq = self.current_running_sequence
+            where = f" in “{seq}”" if seq else ""
+            self.lbl_approval.setText(
+                f"<b>Waiting for your review:</b> {chans}{where}. Check it, then approve to continue."
+            )
+        self.approval_banner.setVisible(bool(waiting))
 
     def build_manual_tab(self):
         widget = QWidget()
@@ -1431,6 +1485,20 @@ class JebaoPumpGUI(QMainWindow):
             if self.config.data.get("sequence"):
                 self._apply_sequence_data(self.config.data["sequence"])
 
+    def sort_pumps_by_name(self):
+        """Put the pumps in natural name order (JP 2 before JP 10) and remember it."""
+        devices = sorted(
+            self.cloud_devices, key=lambda d: natural_key(d.get("dev_alias") or d.get("mac") or "")
+        )
+        self.config.data["pump_order"] = [d.get("did") for d in devices]
+        self.config.save()
+        current = self.current_pump_did
+        self.populate_sidebar()
+        for i in range(self.pump_list.count()):
+            if self.pump_list.item(i).data(Qt.ItemDataRole.UserRole) == current:
+                self.pump_list.setCurrentRow(i)
+        logger.info("Pumps sorted by name.")
+
     def get_device_name(self, did):
         for d in self.cloud_devices:
             if d.get("did") == did:
@@ -1896,10 +1964,7 @@ class JebaoPumpGUI(QMainWindow):
                 if self._ch_review_events.get(ch):
                     self._ch_review_events[ch].set()
                     self._ch_review_events[ch] = None
-                self.btn_approve_channels[ch - 1].setEnabled(False)
-                self.btn_approve_channels[ch - 1].setStyleSheet("background-color: #6C757D; color: white;")
-            self.btn_approve_all.setEnabled(False)
-            self.btn_approve_all.setStyleSheet("background-color: #6C757D; color: white;")
+            self.refresh_approval_banner()
 
     async def _run_channel_sequence(self, ch, seq_name, seq_data, call_stack, sync_barriers):
         if seq_name in call_stack:
@@ -1947,11 +2012,7 @@ class JebaoPumpGUI(QMainWindow):
                 event = asyncio.Event()
                 self._ch_review_events[ch] = event
 
-                # Enable the UI buttons
-                self.btn_approve_channels[ch - 1].setEnabled(True)
-                self.btn_approve_channels[ch - 1].setStyleSheet("background-color: #28A745; color: white;")
-                self.btn_approve_all.setEnabled(True)
-                self.btn_approve_all.setStyleSheet("background-color: #0078D7; color: white;")
+                self.refresh_approval_banner()
 
                 await event.wait()
                 logger.info(f"[CH{ch} Step {r + 1}] Resumed from User Review.")
