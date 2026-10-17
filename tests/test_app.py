@@ -358,3 +358,24 @@ def test_failed_automatic_shortcut_is_logged_and_retried_next_launch(window, cap
         window._shortcut_done(RuntimeError("no desktop"), first=True)
     assert "no desktop" in caplog.text
     assert jebao_gui.shortcut.load_state(jebao_gui.APP_DIR) == {}
+
+
+# --- persistent system log ------------------------------------------------------------------
+
+
+def test_history_is_shown_when_the_window_opens(qt_loop, monkeypatch, tmp_path):
+    monkeypatch.setattr(jebao_gui, "APP_DIR", str(tmp_path))
+    win = jebao_gui.JebaoPumpGUI(history=["── Yesterday ──", "[17:58:41] Sequence done"])
+    text = win.log_text.toPlainText()
+    assert text.index("Sequence done") < text.index("App started") < text.index("Initialized")
+    win.close()
+
+
+def test_log_retention_is_a_setting(window, monkeypatch):
+    pruned = []
+    monkeypatch.setattr(jebao_gui.eventlog, "prune", lambda folder, days: pruned.append(days))
+    dlg = jebao_gui.SettingsDialog(window.secrets, window.config, window)
+    assert dlg.log_days_spin.value() == window.config.data.get("log_keep_days", 30)
+    dlg.log_days_spin.setValue(45)
+    dlg.accept()
+    assert window.config.data["log_keep_days"] == 45 and pruned == [45]

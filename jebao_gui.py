@@ -25,6 +25,7 @@ os.chdir(DATA_DIR)
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import crash_log
+import eventlog
 import settings_location
 import shortcut
 import updater
@@ -66,6 +67,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTableWidget,
@@ -511,6 +513,15 @@ class SettingsDialog(QDialog):
         self.size_combo.currentTextChanged.connect(self.preview_changes)
         layout.addRow("Text Size:", self.size_combo)
 
+        self.log_days_spin = QSpinBox()
+        self.log_days_spin.setRange(1, 3650)
+        self.log_days_spin.setSuffix(" days")
+        self.log_days_spin.setValue(int(self.config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS)))
+        self.log_days_spin.setToolTip(
+            "How long the system log is kept on this computer. Older days are deleted when the app starts."
+        )
+        layout.addRow("Keep System Log For:", self.log_days_spin)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -539,7 +550,9 @@ class SettingsDialog(QDialog):
 
         self.config.data["theme"] = self.theme_combo.currentText()
         self.config.data["text_size"] = self.size_combo.currentText()
+        self.config.data["log_keep_days"] = self.log_days_spin.value()
         self.config.save()
+        eventlog.prune(eventlog.log_dir(DATA_DIR), self.log_days_spin.value())
 
         apply_global_theme(QApplication.instance(), self.config)
         super().accept()
@@ -557,7 +570,8 @@ class SettingsDialog(QDialog):
 
 
 class JebaoPumpGUI(QMainWindow):
-    def __init__(self):
+    def __init__(self, history=None):
+        self._history = history or []
         super().__init__()
         self.setWindowTitle("Jebao Multi-Pump SPE Sequencer (Cloud Edition)")
         self.setMinimumSize(1100, 800)
@@ -730,12 +744,28 @@ class JebaoPumpGUI(QMainWindow):
 
         bottom_splitter.addWidget(bottom_left)
 
-        # 4. Bottom Right: Event Log
-        log_group = QGroupBox("Live Event Log")
+        # 4. Bottom Right: System Log (kept on disk, see eventlog.py)
+        log_group = QGroupBox("System Log")
         log_layout = QVBoxLayout()
+        log_header = QHBoxLayout()
+        keep = int(self.config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS))
+        self.lbl_log_info = QLabel(f"Saved on this computer for {keep} days (change in Settings).")
+        self.lbl_log_info.setStyleSheet("color: grey;")
+        log_header.addWidget(self.lbl_log_info)
+        log_header.addStretch(1)
+        btn_log_folder = QPushButton("Open Log Folder")
+        btn_log_folder.clicked.connect(self.open_log_folder)
+        log_header.addWidget(btn_log_folder)
+        log_layout.addLayout(log_header)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: Consolas;")
+        self.log_text.setStyleSheet(
+            "background-color: #1E1E1E; color: #D4D4D4; font-family: Consolas, Menlo, monospace;"
+        )
+        for line in self._history:
+            self.log_text.append(line)
+        if self._history:
+            self.log_text.append(f"── App started {datetime.now():%H:%M:%S} ──")
         log_layout.addWidget(self.log_text)
         log_group.setLayout(log_layout)
         bottom_splitter.addWidget(log_group)
@@ -762,6 +792,11 @@ class JebaoPumpGUI(QMainWindow):
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
         self.update_clock()
+
+    def open_log_folder(self):
+        folder = eventlog.log_dir(DATA_DIR)
+        os.makedirs(folder, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def update_clock(self):
         now = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
@@ -2259,7 +2294,14 @@ def main():
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    window = JebaoPumpGUI()
+    # The system log is kept on disk: show recent history, then keep writing to it.
+    folder = eventlog.log_dir(DATA_DIR)
+    keep_days = int(config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS))
+    eventlog.prune(folder, keep_days)
+    history = eventlog.format_history(eventlog.load_recent(folder, keep_days))
+    logger.addHandler(eventlog.DailyFileHandler(folder))
+
+    window = JebaoPumpGUI(history=history)
     window.show()
     QTimer.singleShot(1500, window.start_background_tasks)
 
