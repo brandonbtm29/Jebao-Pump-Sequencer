@@ -32,6 +32,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 
 ## Install
 
+**Easiest:** double-click `Setup_Windows.bat` (Windows) or `Setup_Mac.command` (macOS) once. It creates the `.venv` folder and installs everything the app needs; run it again any time to repair or update the packages. The manual steps follow.
+
 1. Get the code:
    ```
    git clone https://github.com/brandonbtm29/Jebao-Pump-Sequencer.git
@@ -83,7 +85,7 @@ The app keeps two settings files:
 You don't need to write either file yourself. The app creates them when you save settings.
 
 - **Where they live:** by default in the app folder. Both are listed in `.gitignore`, so they never get committed. **Settings → Settings Folder** can move them. A folder inside a synced drive (SyncThing, OneDrive…) shares them between computers. The choice is stored in `settings_location.json`, and the `UAKRON_SETTINGS_DIR` environment variable overrides it.
-- **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump` and writes `crash_log.txt` there if it crashes. Set `UAKRON_APP_DATA_DIR` to use a different folder. The app creates the folder if it is missing. The event log is shown in the window but not saved to a file.
+- **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump` and writes errors (with tracebacks) to `logs/jebao_pump_sequencer.log` there; an unexpected error is shown in a dialog instead of closing the app. Set `UAKRON_APP_DATA_DIR` to use a different folder. The app creates the folder if it is missing. The event log is shown in the window but not saved to a file.
 
 ## How it works
 

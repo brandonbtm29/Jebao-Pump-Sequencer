@@ -11,7 +11,7 @@ if ! "$PY" -c "import PyQt6.QtWidgets, qasync, requests" 2>/dev/null; then
   echo
   "$PY" -c "import PyQt6.QtWidgets, qasync, requests"
   echo
-  echo "Set it up with:  python3 -m venv .venv && .venv/bin/pip install -e ."
+  echo "To install what it needs, double-click Setup_Mac.command."
   read -r -p "Press Enter to close"
   exit 1
 fi

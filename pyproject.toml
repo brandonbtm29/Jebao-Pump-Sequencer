@@ -43,7 +43,7 @@ jebao-pump = "jebao_gui:main"
 path = "jebao_gui.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["jebao_gui.py", "settings_location.py", "updater.py", "shortcut.py", "assets"]
+only-include = ["jebao_gui.py", "settings_location.py", "crash_log.py", "updater.py", "shortcut.py", "assets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

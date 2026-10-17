@@ -14,7 +14,7 @@ if errorlevel 1 (
   echo.
   "%PY%" -c "import PyQt6.QtWidgets, qasync, requests"
   echo.
-  echo Set it up with:  python -m venv .venv  and then  .venv\Scripts\pip install -e .
+  echo To install what it needs, double-click Setup_Windows.bat.
   pause
   exit /b 1
 )

@@ -4,6 +4,12 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+- **Error log**: errors, with tracebacks (also from background threads), go to `logs/jebao_pump_sequencer.log`
+  in the data folder (replaces `crash_log.txt`, which only kept the last crash). An unexpected error is
+  shown in a dialog and the app keeps running instead of closing.
+- `Setup_Windows.bat` / `Setup_Mac.command`: one double-click creates the `.venv` and installs everything.
+
 ## [1.3.0] - 2026-10-15
 
 ### Added

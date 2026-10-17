@@ -24,6 +24,7 @@ os.chdir(DATA_DIR)
 # folder instead, e.g. "Settings" inside the data folder.
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
+import crash_log
 import settings_location
 import shortcut
 import updater
@@ -36,7 +37,6 @@ import json
 import logging
 import subprocess
 import time
-import traceback
 from datetime import datetime
 
 import qasync
@@ -75,14 +75,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
-def log_uncaught_exceptions(ex_cls, ex, tb):
-    with open("crash_log.txt", "w") as f:
-        traceback.print_exception(ex_cls, ex, tb, file=f)
-    sys.__excepthook__(ex_cls, ex, tb)
-
-
-sys.excepthook = log_uncaught_exceptions
+# Errors (with tracebacks, also from background threads) go to logs/jebao_pump_sequencer.log
+# in the data folder; an uncaught error is shown in a dialog instead of closing the app.
+crash_log.setup("jebao_pump_sequencer", os.path.join(DATA_DIR, "logs"), __version__)
 
 logger = logging.getLogger("JebaoGUI")
 logger.setLevel(logging.DEBUG)
