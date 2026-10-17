@@ -365,10 +365,29 @@ def test_failed_automatic_shortcut_is_logged_and_retried_next_launch(window, cap
 
 def test_history_is_shown_when_the_window_opens(qt_loop, monkeypatch, tmp_path):
     monkeypatch.setattr(jebao_gui, "APP_DIR", str(tmp_path))
+    handlers_before = list(jebao_gui.logger.handlers)
     win = jebao_gui.JebaoPumpGUI(history=["── Yesterday ──", "[17:58:41] Sequence done"])
-    text = win.log_text.toPlainText()
-    assert text.index("Sequence done") < text.index("App started") < text.index("Initialized")
-    win.close()
+    try:
+        text = win.log_text.toPlainText()
+        assert text.index("Sequence done") < text.index("App started") < text.index("Initialized")
+    finally:
+        for handler in jebao_gui.logger.handlers[:]:
+            if handler not in handlers_before:
+                jebao_gui.logger.removeHandler(handler)
+        win.close()
+
+
+def test_logging_after_the_log_box_is_gone_is_harmless(qt_loop):
+    from PyQt6 import sip
+    from PyQt6.QtWidgets import QTextEdit
+
+    box = QTextEdit()
+    handler = jebao_gui.GUILogHandler(box)
+    sip.delete(box)
+    record = jebao_gui.logging.LogRecord(
+        "JebaoGUI", jebao_gui.logging.INFO, __file__, 1, "late line", None, None
+    )
+    handler.emit(record)  # must not raise, even with no excepthook installed
 
 
 def test_log_retention_is_a_setting(window, monkeypatch):

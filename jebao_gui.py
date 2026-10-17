@@ -115,7 +115,12 @@ class _LogBridge(QObject):
     @pyqtSlot(str)
     def append(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.text_widget.append(f"[{timestamp}] {msg}")
+        try:
+            self.text_widget.append(f"[{timestamp}] {msg}")
+        except (
+            RuntimeError
+        ):  # the window is already gone (closing the app); the line is still in the log file
+            pass
 
 
 class GUILogHandler(logging.Handler):
@@ -651,9 +656,17 @@ class JebaoPumpGUI(QMainWindow):
         logger.info("Jebao SPE GUI Initialized (Cloud Mode).")
 
         if self.secrets.data.get("username") and self.secrets.data.get("password"):
-            QTimer.singleShot(100, lambda: asyncio.create_task(self.login_and_fetch()))
+            QTimer.singleShot(100, lambda: self._start_task(self.login_and_fetch))
 
-        QTimer.singleShot(200, lambda: asyncio.create_task(self._queue_worker()))
+        QTimer.singleShot(200, lambda: self._start_task(self._queue_worker))
+
+    def _start_task(self, coro_fn):
+        """Start an async job on the app's event loop (skipped when no loop is running, as in tests)."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return asyncio.create_task(coro_fn())
 
     def setup_ui(self):
         central_widget = QWidget()
