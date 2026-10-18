@@ -1,8 +1,26 @@
 # Changelog
 
-All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/), and the project uses [Semantic Versioning](https://semver.org/): new features bump the middle number (1.1.0 → 1.2.0), fixes bump the last (1.1.0 → 1.1.1), and changes that break existing settings or saved sequences bump the first.
+All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/), and the project uses [Semantic Versioning](https://semver.org/): new features bump the middle number (1.1.0 → 1.2.0), fixes bump the last (1.1.0 → 1.1.1), and the first number changes for a major redesign or for changes that break existing settings or saved sequences.
 
 ## [Unreleased]
+
+## [2.0.0] - 2026-10-17
+
+A new layout built around the rack of pumps. Your login, calibrations, pump order and saved sequences carry over; the pumps start in one stack in your old order until you arrange them in the Rack tab.
+
+### Added
+- **Manual** tab: every pump as it sits on the bench, each head as a tile with its name, flow rate, status and time left. Select heads (or **All 4** of a pump) and dispense a volume or run them for a time, all at once; each head runs for its own calibrated time. Pause, resume or cancel the selected heads. Tile size S / M / L.
+- **Rack** tab: set the number of stacks and pumps per stack, drag pumps into place (or click a pump, then a slot), **Auto-arrange A→Z**, and name each pump and head (e.g. "Water → Col 3"). Names show on the tiles, in the Sequencer and in the log.
+- Heads still on the 1.0 mL/min default are marked "not calibrated"; saving a calibration records its date.
+- If a pump won't start, nothing is dispensed there and the log says so; a failed STOP is reported too.
+
+### Changed
+- Tabs are now Manual | Sequencer | Calibration | Rack. Saved sequences and the queue moved into the Sequencer tab.
+- Refresh, Settings and the connection status moved to a bar along the top. The system log sits under every tab; drag the divider to give it more or less room.
+- Emergency Stop also cancels manual doses.
+
+### Removed
+- The one-pump Manual Control tab and the pump list in the sidebar (replaced by the Manual and Rack tabs). Sort A→Z is now **Auto-arrange A→Z** in the Rack tab.
 
 ## [1.4.0] - 2026-10-17
 
@@ -73,7 +91,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.1.0...v1.2.0
