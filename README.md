@@ -1,8 +1,8 @@
 # Jebao Pump Sequencer
 
-A desktop app for running Jebao MD-4.4 / Doser 2.4 four-channel dosing pumps from a computer: manual doses, per-channel calibration, multi-step sequences across several pumps, and one big emergency stop.
+A desktop app for running Jebao MD-4.4 / Doser 2.4 four-channel dosing pumps from a computer: a live view of every pump head, dosing on many heads at once, calibration, multi-step sequences across several pumps, and one big emergency stop.
 
-![Sequencer tab with a six-step sequence across three pumps](docs/screenshot-sequencer.png)
+![Manual tab: two stacks of five pumps, each head with its name, flow rate and status; three heads selected for dispensing](docs/screenshot-manual.png)
 
 ## Why
 
@@ -10,21 +10,23 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 
 ## Features
 
-- **Manual control**: dose any channel by volume (mL) or by time (s), pause it, or cancel it.
-- **Calibration**: run a channel for 60 seconds, type in the volume or mass you collected (water, ethanol, methanol or a custom density), and the app saves that channel's flow rate together with the tubing size.
-- **Sequences**: build a table of steps (Dose, Staccato, Pause, Pause for user review, Wait for all, Run sub-sequence) across any of your pumps, save it under a name, and reuse it.
+- **Manual tab, the whole rack at a glance**: every pump appears where it sits on the bench, with its four heads as tiles showing the head's name, flow rate and what it's doing (idle, running with time left, paused, offline, not calibrated yet). Tile size S / M / L fits small and large screens.
+- **Dose many heads at once**: click heads (or **All 4** on a pump) to select them, then dispense a volume (mL) or run them for a time (s). Each head runs for its own calibrated time; all start together. Pause, resume or cancel the selected heads.
+- **Rack tab, your physical setup**: choose how many stacks and pumps per stack, drag pumps into place (or **Auto-arrange A→Z**: JP 2 comes before JP 10), and give each pump and head a name, like "Water → Col 3". Other people can set up their own rigs the same way.
+- **Calibration**: run a channel for 60 seconds, type in the volume or mass you collected (water, ethanol, methanol or a custom density), and the app saves that channel's flow rate, the tubing size and the date.
+- **Sequences**: build a table of steps (Dose, Staccato, Pause, Pause for user review, Wait for all, Run sub-sequence) across any of your pumps, save it under a name, and reuse it. Saved sequences and the queue are in the Sequencer tab.
 - **Channels run side by side**: each channel works through its own steps at the same time as the others. "Wait for All" lines them up again, and async doses run in the background.
 - **Queue**: line up several saved sequences and they run one after another.
-- **User review steps**: a sequence can stop and wait until you click **Approve** for that channel.
-- **Emergency stop**: one button cancels the running sequence, clears the queue and turns off all four channels on every pump.
-- **Shared settings**: keep your login, calibrations and sequences in a synced folder so every computer uses the same ones.
-- **System log that's kept**: everything the app does is logged and saved on each computer for 30 days (adjustable in Settings). When you open the app, recent history is shown again above the new session.
 - **Review steps you can't miss**: when a sequence waits for your review, an orange bar appears across the top with an Approve button for each waiting channel.
-- **Pump order**: drag pumps in the list into your own order, or press **Sort A→Z** (JP 2 comes before JP 10).
+- **Emergency stop**: one button cancels the running sequence and any manual doses, clears the queue and turns off all four channels on every pump.
+- **System log under every tab**: everything the app does is logged and saved on each computer for 30 days (adjustable in Settings). When you open the app, recent history is shown again above the new session.
+- **Shared settings**: keep your login, calibrations, layout, names and sequences in a synced folder so every computer uses the same ones.
 - **Version and updates**: the version is shown in the bottom-right corner. When a newer release is out it turns orange ("Update available"); click it to see what changed and update. It won't update while a sequence, dose or calibration is running.
 - **Desktop shortcut**: the app puts an icon on your desktop the first time it starts and refreshes it after each update. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock. You can turn this off in Settings.
 
-![Manual Control tab](docs/screenshot-manual.png)
+![Rack tab: two stacks of five pumps, the Not placed list, and the names of one pump's heads](docs/screenshot-rack.png)
+
+![Sequencer tab: saved sequences and the queue on the left, a six-step sequence across three pumps](docs/screenshot-sequencer.png)
 
 ## Requirements
 
@@ -60,9 +62,12 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 ## First run
 
 1. Click **Settings** and enter the email and password of your Jebao account. Choose a theme and text size if you like.
-2. The app logs in and lists your pumps under **Connected Pumps**. It uses the names you gave them in the phone app.
-3. Calibrate each channel you plan to use (**Calibration** tab). Until you do, the app assumes 1 mL/min, so volume doses will be wrong.
-4. Try a small manual dose, then build a sequence.
+2. The app logs in and shows your pumps in the **Manual** tab, using the names you gave them in the phone app. At first they are all in one stack.
+3. Open the **Rack** tab and arrange them as they sit on your bench: set the number of stacks and pumps per stack, then drag each pump into its place (or press **Auto-arrange A→Z**). Click a pump to name it and its heads.
+4. Calibrate each head you plan to use (**Calibration** tab). Until you do, the app assumes 1 mL/min and marks the head "not calibrated", so volume doses would be wrong.
+5. In **Manual**, select a head, try a small dose, then build a sequence in **Sequencer**.
+
+Coming from 1.x? Your login, calibrations, pump order and saved sequences carry over. The pumps start in one stack in your old order until you arrange them in the Rack tab.
 
 ## Updating
 
@@ -83,7 +88,7 @@ The app keeps two settings files:
 | File | What's in it | Example |
 |---|---|---|
 | `secrets.json` | Your Jebao login | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, pump order, calibrations, tubing sizes, last volumes, the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, tubing sizes, Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 
