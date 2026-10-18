@@ -63,7 +63,12 @@ def test_checkable_combo_reports_checked_channels(qt_loop):
 
 def test_window_starts_without_login(window):
     assert window.cloud_token is None
-    assert window.tabs.count() == 3
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
+        "Manual",
+        "Sequencer",
+        "Calibration",
+        "Rack",
+    ]
 
 
 def test_control_command_payload(window, qt_loop, monkeypatch):
@@ -220,8 +225,8 @@ def test_manual_dose_counts_as_busy_until_done(window, qt_loop, monkeypatch):
         return True
 
     monkeypatch.setattr(window, "send_cloud_command", fake_send)
-    loop.run_until_complete(window._async_dose("A", 1, 0.0, "Time (s)"))
-    assert seen == [1, 1]  # busy while the motor command was sent
+    loop.run_until_complete(window._manual_pump_dispense("A", [(1, 0.0)], 0, "time"))
+    assert seen == [1, 1]  # busy while the motor commands were sent
     assert window._motor_jobs == 0
 
 
@@ -423,14 +428,17 @@ def test_natural_sort_key():
     assert sorted(names, key=jebao_gui.natural_key) == ["jp 1: EtOH", "JP 1b", "JP 2: Water", "JP 10: Sample"]
 
 
-def test_sort_pumps_by_name(window):
+def test_first_run_puts_pumps_in_one_stack_in_the_old_order(window):
+    window.config.data.pop("rack", None)
+    window.config.data["pump_order"] = ["b", "a"]
     window.cloud_devices = [
-        {"did": d, "dev_alias": n} for d, n in [("c", "JP 10"), ("a", "JP 2"), ("b", "JP 1")]
+        {"did": d, "dev_alias": n, "is_online": True}
+        for d, n in [("a", "JP 1"), ("b", "JP 2"), ("c", "JP 3")]
     ]
-    window.populate_sidebar()
-    window.sort_pumps_by_name()
-    assert window.config.data["pump_order"] == ["b", "a", "c"]
-    assert [window.pump_list.item(i).text().split(" (")[0] for i in range(3)] == ["JP 1", "JP 2", "JP 10"]
+    window.refresh_pumps()
+    assert window.config.data["rack"]["stacks"][0]["slots"] == ["b", "a", "c"]
+    assert [d["did"] for d in window.cloud_devices] == ["b", "a", "c"]
+    window.config.data.pop("rack", None)
 
 
 def test_restart_lives_in_settings_and_clock_in_status_bar(window):

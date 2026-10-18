@@ -26,9 +26,11 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import crash_log
 import eventlog
+import rack
 import settings_location
 import shortcut
 import updater
+from rack_widgets import ManualTab, RackTab
 
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
@@ -36,7 +38,6 @@ SETTINGS_FILES = ["jebao_config.json", "secrets.json"]
 import asyncio
 import json
 import logging
-import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -95,11 +96,7 @@ APPROVE_STYLE = (
 APPROVE_ALL_STYLE = "QPushButton { background-color: transparent; color: #FFE2C2; border: 1px solid #A8682A; padding: 6px 12px; }"
 
 
-def natural_key(text):
-    """Sort key that orders numbers by value: 'JP 2' comes before 'JP 10'."""
-    return [
-        (0, int(part), "") if part.isdigit() else (1, 0, part.lower()) for part in re.split(r"(\d+)", text)
-    ]
+natural_key = rack.natural_key  # kept here for older imports
 
 
 @dataclass
@@ -672,7 +669,6 @@ class JebaoPumpGUI(QMainWindow):
 
         self.cloud_token = None
         self.cloud_devices = []
-        self.current_pump_did = None
 
         self.sequence_queue = []
         self.current_running_sequence = None
@@ -717,6 +713,24 @@ class JebaoPumpGUI(QMainWindow):
         # The clock lives in the status bar (see _build_status_bar).
         self.lbl_clock = QLabel()
 
+        # --- Top bar: connection, Refresh, Settings ---
+        top = QHBoxLayout()
+        title = QLabel("Jebao Pump Sequencer")
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        top.addWidget(title)
+        top.addStretch(1)
+        self.status_indicator = QLabel()
+        self.set_status_color(self.status_indicator, False)
+        top.addWidget(self.status_indicator)
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.setToolTip("Log in again and reload the pumps on your account.")
+        self.btn_refresh.clicked.connect(lambda: asyncio.create_task(self.login_and_fetch()))
+        top.addWidget(self.btn_refresh)
+        self.btn_settings = QPushButton("⚙ Settings")
+        self.btn_settings.clicked.connect(self.open_settings)
+        top.addWidget(self.btn_settings)
+        main_layout.addLayout(top)
+
         # --- Approval banner: shown only while a sequence step waits for review ---
         self.approval_banner = QFrame()
         self.approval_banner.setStyleSheet(
@@ -745,116 +759,14 @@ class JebaoPumpGUI(QMainWindow):
         self.approval_banner.setVisible(False)
         main_layout.addWidget(self.approval_banner)
 
-        # --- TOP SPLITTER (Queue & Main UI) ---
-        top_splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # 1. Left Sidebar: Sequence Manager & Queue
-        seq_sidebar = QWidget()
-        seq_sidebar_layout = QVBoxLayout(seq_sidebar)
-        seq_sidebar_layout.setContentsMargins(0, 0, 0, 0)
-
-        seq_sidebar_layout.addWidget(QLabel("<b>Saved Sequences</b>"))
-        self.saved_seq_list = QListWidget()
-        seq_sidebar_layout.addWidget(self.saved_seq_list)
-
-        saved_btn_layout1 = QHBoxLayout()
-        btn_save = QPushButton("💾 Save")
-        btn_save.clicked.connect(self.save_sequence_dialog)
-        btn_load = QPushButton("📂 Load")
-        btn_load.clicked.connect(self.load_selected_sequence)
-        btn_queue = QPushButton("▶ Queue")
-        btn_queue.clicked.connect(self.queue_selected_sequence)
-
-        saved_btn_layout1.addWidget(btn_save)
-        saved_btn_layout1.addWidget(btn_load)
-        saved_btn_layout1.addWidget(btn_queue)
-        seq_sidebar_layout.addLayout(saved_btn_layout1)
-
-        saved_btn_layout2 = QHBoxLayout()
-        btn_rename = QPushButton("✏ Rename")
-        btn_rename.clicked.connect(self.rename_selected_sequence)
-        btn_delete = QPushButton("🗑 Delete")
-        btn_delete.clicked.connect(self.delete_selected_sequence)
-
-        saved_btn_layout2.addWidget(btn_rename)
-        saved_btn_layout2.addWidget(btn_delete)
-        seq_sidebar_layout.addLayout(saved_btn_layout2)
-
-        seq_sidebar_layout.addWidget(QLabel("<b>Execution Queue</b>"))
-        self.queue_list = QListWidget()
-        self.queue_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        seq_sidebar_layout.addWidget(self.queue_list)
-
-        top_splitter.addWidget(seq_sidebar)
-
-        # 2. Center Panel: Tabs
-        self.center_panel = QWidget()
-        center_layout = QVBoxLayout(self.center_panel)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.lbl_active_pump = QLabel("<h3>Select a Pump Below</h3>")
-        self.lbl_active_pump.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(self.lbl_active_pump)
-
+        # --- Tabs: Manual | Sequencer | Calibration | Rack ---
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.build_manual_tab(), "🎮 Manual Control")
-        self.tabs.addTab(self.build_calibration_tab(), "⚖ Calibration")
-        self.tabs.addTab(self.build_sequencer_tab(), "⏱ Sequencer")
-        center_layout.addWidget(self.tabs)
-
-        top_splitter.addWidget(self.center_panel)
-        top_splitter.setSizes([250, 850])
-        main_layout.addWidget(top_splitter, 3)
-
-        # --- BOTTOM SPLITTER (Pumps & Event Log) ---
-        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # 3. Bottom Left: Pump List & Settings
-        bottom_left = QWidget()
-        bl_layout = QVBoxLayout(bottom_left)
-        bl_layout.setContentsMargins(0, 0, 0, 0)
-
-        bl_header = QHBoxLayout()
-        bl_header.addWidget(QLabel("<b>Connected Pumps</b>"))
-
-        self.status_indicator = QLabel("DISCONNECTED")
-        self.status_indicator.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.set_status_color(self.status_indicator, False)
-        bl_header.addWidget(self.status_indicator)
-
-        bl_layout.addLayout(bl_header)
-
-        sort_row = QHBoxLayout()
-        sort_hint = QLabel("Drag to reorder")
-        sort_hint.setStyleSheet("color: grey;")
-        sort_row.addWidget(sort_hint)
-        sort_row.addStretch(1)
-        self.btn_sort_pumps = QPushButton("Sort A→Z")
-        self.btn_sort_pumps.setToolTip("Sort pumps by name, with numbers in order (JP 2 before JP 10).")
-        self.btn_sort_pumps.clicked.connect(self.sort_pumps_by_name)
-        sort_row.addWidget(self.btn_sort_pumps)
-        bl_layout.addLayout(sort_row)
-
-        self.pump_list = QListWidget()
-        self.pump_list.setToolTip("Drag pumps to put them in your own order.")
-        self.pump_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.pump_list.model().rowsMoved.connect(self.save_pump_order)
-        self.pump_list.currentItemChanged.connect(self.on_pump_selected)
-        bl_layout.addWidget(self.pump_list)
-
-        # Cloud settings buttons horizontal row
-        cloud_btn_layout = QHBoxLayout()
-        self.btn_settings = QPushButton("⚙ Settings")
-        self.btn_settings.clicked.connect(self.open_settings)
-        cloud_btn_layout.addWidget(self.btn_settings)
-
-        self.btn_refresh = QPushButton("Refresh")
-        self.btn_refresh.clicked.connect(lambda: asyncio.create_task(self.login_and_fetch()))
-        cloud_btn_layout.addWidget(self.btn_refresh)
-
-        bl_layout.addLayout(cloud_btn_layout)
-
-        bottom_splitter.addWidget(bottom_left)
+        self.manual_tab = ManualTab(self)
+        self.tabs.addTab(self.manual_tab, "Manual")
+        self.tabs.addTab(self.build_sequencer_page(), "Sequencer")
+        self.tabs.addTab(self.build_calibration_tab(), "Calibration")
+        self.rack_tab = RackTab(self)
+        self.tabs.addTab(self.rack_tab, "Rack")
 
         # 4. Bottom Right: System Log (kept on disk, see eventlog.py)
         log_group = QGroupBox("System Log")
@@ -880,10 +792,15 @@ class JebaoPumpGUI(QMainWindow):
             self.log_text.append(f"── App started {datetime.now():%H:%M:%S} ──")
         log_layout.addWidget(self.log_text)
         log_group.setLayout(log_layout)
-        bottom_splitter.addWidget(log_group)
 
-        bottom_splitter.setSizes([250, 850])
-        main_layout.addWidget(bottom_splitter, 1)
+        # The log sits under every tab; drag the divider to give it more or less room.
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self.tabs)
+        splitter.addWidget(log_group)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([640, 170])
+        main_layout.addWidget(splitter, 1)
 
         # Emergency Stop spanning all
         self.btn_estop = QPushButton("🚨 EMERGENCY STOP ALL PUMPS 🚨")
@@ -898,6 +815,11 @@ class JebaoPumpGUI(QMainWindow):
         logger.addHandler(gui_handler)
 
         self.refresh_saved_sequences_ui()
+
+        # Tiles and the dispense panel follow the motor runs a few times a second
+        self.ui_timer = QTimer(self)
+        self.ui_timer.timeout.connect(self.manual_tab.refresh)
+        self.ui_timer.start(300)
 
         # Start Clock Timer
         self.clock_timer = QTimer(self)
@@ -1024,32 +946,6 @@ class JebaoPumpGUI(QMainWindow):
         subprocess.Popen([sys.executable] + sys.argv)  # noqa: S603 (restarts this same app)
         QApplication.quit()
 
-    def toggle_channel_pause(self, ch, btn):
-        if self._ch_paused[ch]:
-            # It is currently paused, we want to resume
-            self._ch_paused[ch] = False
-            self._ch_resume_events[ch].set()
-            btn.setText("Pause")
-            btn.setStyleSheet("background-color: #FFA500; color: black; padding: 5px;")
-        else:
-            # It is currently running, we want to pause
-            self._ch_paused[ch] = True
-            self._ch_resume_events[ch].clear()
-            btn.setText("Resume")
-            btn.setStyleSheet("background-color: #28A745; color: white; padding: 5px;")
-
-    def cancel_channel_dose(self, ch):
-        self._ch_cancelled[ch] = True
-        # If it was paused, resume it so the loop can process the cancellation
-        if self._ch_paused[ch]:
-            self._ch_paused[ch] = False
-            self._ch_resume_events[ch].set()
-            # Note: The Pause button UI won't reset automatically here, but that's a minor visual detail.
-
-        if self.current_pump_did:
-            asyncio.create_task(self.send_cloud_command(self.current_pump_did, {f"channe{ch}": False}))
-        logger.info(f"[CH{ch}] Cancellation requested by user.")
-
     def approve_channel(self, ch):
         if self._ch_review_events.get(ch):
             self._ch_review_events[ch].set()
@@ -1078,63 +974,49 @@ class JebaoPumpGUI(QMainWindow):
             )
         self.approval_banner.setVisible(bool(waiting))
 
-    def build_manual_tab(self):
-        widget = QWidget()
-        layout = QGridLayout(widget)
-        self.channel_spins = []
-        self.channel_units = []
+    def build_sequencer_page(self):
+        """The Sequencer tab: saved sequences and the queue on the left, the step table on the right."""
+        page = QSplitter(Qt.Orientation.Horizontal)
+        seq_sidebar = QWidget()
+        seq_sidebar_layout = QVBoxLayout(seq_sidebar)
+        seq_sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
-        for i in range(4):
-            ch_num = i + 1
-            frame = QFrame()
-            frame.setFrameShape(QFrame.Shape.StyledPanel)
-            flayout = QVBoxLayout(frame)
-            header = QLabel(f"Channel {ch_num}")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            header.setStyleSheet("font-weight: bold;")
-            flayout.addWidget(header)
+        seq_sidebar_layout.addWidget(QLabel("<b>Saved Sequences</b>"))
+        self.saved_seq_list = QListWidget()
+        seq_sidebar_layout.addWidget(self.saved_seq_list)
 
-            vol_layout = QHBoxLayout()
-            unit_combo = QComboBox()
-            unit_combo.addItems(["Vol (mL)", "Time (s)"])
-            unit_combo.currentIndexChanged.connect(self.save_current_pump_state)
-            self.channel_units.append(unit_combo)
-            vol_layout.addWidget(unit_combo)
+        saved_btn_layout1 = QHBoxLayout()
+        btn_save = QPushButton("💾 Save")
+        btn_save.clicked.connect(self.save_sequence_dialog)
+        btn_load = QPushButton("📂 Load")
+        btn_load.clicked.connect(self.load_selected_sequence)
+        btn_queue = QPushButton("▶ Queue")
+        btn_queue.clicked.connect(self.queue_selected_sequence)
 
-            spin = QDoubleSpinBox()
-            spin.setRange(0.1, 9999.9)
-            spin.setValue(10.0)
-            spin.valueChanged.connect(self.save_current_pump_state)
-            self.channel_spins.append(spin)
-            vol_layout.addWidget(spin)
-            flayout.addLayout(vol_layout)
+        saved_btn_layout1.addWidget(btn_save)
+        saved_btn_layout1.addWidget(btn_load)
+        saved_btn_layout1.addWidget(btn_queue)
+        seq_sidebar_layout.addLayout(saved_btn_layout1)
 
-            btn_dose = QPushButton(f"Dose CH {ch_num}")
-            btn_dose.setStyleSheet("background-color: #0078D7; color: white; padding: 5px;")
-            btn_dose.clicked.connect(
-                lambda checked, ch=ch_num, s=spin, u=unit_combo: self.trigger_dose(
-                    self.current_pump_did, ch, s.value(), u.currentText()
-                )
-            )
-            flayout.addWidget(btn_dose)
+        saved_btn_layout2 = QHBoxLayout()
+        btn_rename = QPushButton("✏ Rename")
+        btn_rename.clicked.connect(self.rename_selected_sequence)
+        btn_delete = QPushButton("🗑 Delete")
+        btn_delete.clicked.connect(self.delete_selected_sequence)
 
-            btn_pause = QPushButton("Pause")
-            btn_pause.setStyleSheet("background-color: #FFA500; color: black; padding: 5px;")
-            btn_pause.clicked.connect(
-                lambda checked, ch=ch_num, btn=btn_pause: self.toggle_channel_pause(ch, btn)
-            )
-            flayout.addWidget(btn_pause)
+        saved_btn_layout2.addWidget(btn_rename)
+        saved_btn_layout2.addWidget(btn_delete)
+        seq_sidebar_layout.addLayout(saved_btn_layout2)
 
-            btn_cancel = QPushButton("Cancel Dose")
-            btn_cancel.setStyleSheet("background-color: #DC3545; color: white; padding: 5px;")
-            btn_cancel.clicked.connect(lambda checked, ch=ch_num: self.cancel_channel_dose(ch))
-            flayout.addWidget(btn_cancel)
+        seq_sidebar_layout.addWidget(QLabel("<b>Execution Queue</b>"))
+        self.queue_list = QListWidget()
+        self.queue_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        seq_sidebar_layout.addWidget(self.queue_list)
 
-            row = i // 2
-            col = i % 2
-            layout.addWidget(frame, row, col)
-
-        return widget
+        page.addWidget(seq_sidebar)
+        page.addWidget(self.build_sequencer_tab())
+        page.setSizes([260, 900])
+        return page
 
     def build_calibration_tab(self):
         widget = QWidget()
@@ -1363,6 +1245,9 @@ class JebaoPumpGUI(QMainWindow):
 
                 rate = vol  # 60s run means vol == mL/min
                 p["calibration"][i] = rate
+                dates = (list(p.get("calibrated_at") or []) + [None] * 4)[:4]
+                dates[i] = datetime.now().strftime("%Y-%m-%d")
+                p["calibrated_at"] = dates
                 p["tubing_id"][i] = self.cal_id_spins[i].value()
                 p["tubing_od"][i] = self.cal_od_spins[i].value()
                 saved_any = True
@@ -1496,7 +1381,7 @@ class JebaoPumpGUI(QMainWindow):
             if resp.status_code == 200:
                 self.cloud_devices = resp.json().get("devices", [])
                 logger.info(f"Found {len(self.cloud_devices)} bound devices.")
-                self.populate_sidebar()
+                self.refresh_pumps()
             else:
                 logger.error(f"Failed to fetch devices: {resp.text}")
         except Exception as e:
@@ -1527,40 +1412,50 @@ class JebaoPumpGUI(QMainWindow):
             logger.error(f"Send command error: {e}")
             return False
 
-    # --- Pump Management ---
-    def populate_sidebar(self):
-        self.pump_list.blockSignals(True)
-        self.pump_list.clear()
+    # --- Pumps and the rack ---
+    def rack_layout(self):
+        """The saved physical layout. The first time (2.0), every pump goes into one stack in the old order."""
+        data = self.config.data.get("rack")
+        if not data:
+            dids = [d.get("did") for d in self.cloud_devices]
+            if not dids:
+                return rack.default_layout([])
+            old = [d for d in self.config.data.get("pump_order", []) if d in dids]
+            data = rack.default_layout(old + [d for d in dids if d not in old])
+            self.config.data["rack"] = data
+            self.config.save()
+            logger.info("Put all pumps in one stack. Arrange them as they sit on the bench in the Rack tab.")
+        return rack.normalize(data)
+
+    def save_rack_layout(self, layout):
+        self.config.data["rack"] = rack.normalize(layout)
+        self.config.save()
+        self.refresh_pumps()
+
+    def names_changed(self):
+        """Pump or head names were edited in the Rack tab: show them everywhere."""
+        self.refresh_pumps()
+        if hasattr(self, "seq_table") and self.seq_table.rowCount():
+            self._apply_sequence_data(self._get_sequence_data())
+
+    def refresh_pumps(self):
+        """Show the current pump list and layout in every tab."""
+        layout = self.rack_layout()
+        dids = [d.get("did") for d in self.cloud_devices]
+        order = rack.order(layout, dids)
+        self.cloud_devices.sort(
+            key=lambda d: order.index(d.get("did")) if d.get("did") in order else len(order)
+        )
 
         if hasattr(self, "cal_pump_combo"):
+            current = self.cal_pump_combo.currentData()
             self.cal_pump_combo.blockSignals(True)
             self.cal_pump_combo.clear()
-
-        pump_order = self.config.data.get("pump_order", [])
-
-        def sort_key(d):
-            did = d.get("did")
-            if did in pump_order:
-                return pump_order.index(did)
-            return 9999
-
-        self.cloud_devices.sort(key=sort_key)
-
-        for d in self.cloud_devices:
-            name = d.get("dev_alias") or d.get("mac")
-            did = d.get("did")
-            is_online = d.get("is_online", False)
-            status = " (Online)" if is_online else " (Offline)"
-
-            item = QListWidgetItem(f"{name}{status}")
-            item.setData(Qt.ItemDataRole.UserRole, did)
-            self.pump_list.addItem(item)
-
-            if hasattr(self, "cal_pump_combo"):
-                self.cal_pump_combo.addItem(name, did)
-
-        self.pump_list.blockSignals(False)
-        if hasattr(self, "cal_pump_combo"):
+            for d in self.cloud_devices:
+                self.cal_pump_combo.addItem(self.get_device_name(d.get("did")), d.get("did"))
+            idx = self.cal_pump_combo.findData(current)
+            if idx >= 0:
+                self.cal_pump_combo.setCurrentIndex(idx)
             self.cal_pump_combo.blockSignals(False)
             self.update_cal_labels()
 
@@ -1569,19 +1464,10 @@ class JebaoPumpGUI(QMainWindow):
             if self.config.data.get("sequence"):
                 self._apply_sequence_data(self.config.data["sequence"])
 
-    def sort_pumps_by_name(self):
-        """Put the pumps in natural name order (JP 2 before JP 10) and remember it."""
-        devices = sorted(
-            self.cloud_devices, key=lambda d: natural_key(d.get("dev_alias") or d.get("mac") or "")
-        )
-        self.config.data["pump_order"] = [d.get("did") for d in devices]
-        self.config.save()
-        current = self.current_pump_did
-        self.populate_sidebar()
-        for i in range(self.pump_list.count()):
-            if self.pump_list.item(i).data(Qt.ItemDataRole.UserRole) == current:
-                self.pump_list.setCurrentRow(i)
-        logger.info("Pumps sorted by name.")
+        if hasattr(self, "manual_tab"):
+            self.manual_tab.rebuild()
+        if hasattr(self, "rack_tab"):
+            self.rack_tab.rebuild()
 
     def get_device_name(self, did):
         own = self.config.display_name(did)
@@ -1592,60 +1478,6 @@ class JebaoPumpGUI(QMainWindow):
                 return d.get("dev_alias") or d.get("mac")
         return did
 
-    def on_pump_selected(self, current, previous):
-        if not current:
-            return
-        self.current_pump_did = current.data(Qt.ItemDataRole.UserRole)
-        name = self.get_device_name(self.current_pump_did)
-
-        self.lbl_active_pump.setText(f"<h3>{name}</h3>")
-        self.update_manual_labels()
-
-        if hasattr(self, "cal_pump_combo"):
-            idx = self.cal_pump_combo.findData(self.current_pump_did)
-            if idx >= 0:
-                self.cal_pump_combo.setCurrentIndex(idx)
-
-    def save_pump_order(self, parent, start, end, destination, row):
-        order = []
-        for i in range(self.pump_list.count()):
-            order.append(self.pump_list.item(i).data(Qt.ItemDataRole.UserRole))
-        self.config.data["pump_order"] = order
-        self.config.save()
-
-    def update_manual_labels(self):
-        if not self.current_pump_did:
-            return
-        pump_data = self.config.get_pump(self.current_pump_did)
-
-        for spin in self.channel_spins:
-            spin.blockSignals(True)
-        for combo in self.channel_units:
-            combo.blockSignals(True)
-
-        for i, spin in enumerate(self.channel_spins):
-            if i < len(pump_data["volumes"]):
-                spin.setValue(pump_data["volumes"][i])
-            if i < len(pump_data.get("units", [])):
-                idx = self.channel_units[i].findText(pump_data["units"][i])
-                if idx >= 0:
-                    self.channel_units[i].setCurrentIndex(idx)
-
-        for combo in self.channel_units:
-            combo.blockSignals(False)
-        for spin in self.channel_spins:
-            spin.blockSignals(False)
-
-        self.update_cal_labels()
-
-    def save_current_pump_state(self):
-        if not self.current_pump_did:
-            return
-        pump_data = self.config.get_pump(self.current_pump_did)
-        pump_data["volumes"] = [spin.value() for spin in self.channel_spins]
-        pump_data["units"] = [combo.currentText() for combo in self.channel_units]
-        self.config.save()
-
     def set_status_color(self, label, connected):
         if connected:
             label.setStyleSheet("color: #28A745; font-weight: bold; font-size: 14px;")
@@ -1655,37 +1487,7 @@ class JebaoPumpGUI(QMainWindow):
             label.setText("DISCONNECTED")
 
     # --- Calibration Logic ---
-    # --- Manual & Sequencer Control ---
-    def trigger_dose(self, did, channel, value, unit="Vol (mL)"):
-        if not did:
-            return
-        asyncio.create_task(self._async_dose(did, channel, value, unit))
-
-    async def _async_dose(self, did, channel, value, unit):
-        self._motor_jobs += 1
-        try:
-            if unit == "Time (s)":
-                seconds = value
-                logger.info(f"Dosing for {seconds:.1f}s on CH{channel}...")
-            else:
-                rate = self.config.get_pump(did)["calibration"][channel - 1]
-                seconds = (value / rate) * 60.0
-                logger.info(f"Dosing {value}mL on CH{channel}. Motor running for {seconds:.1f}s...")
-
-            channel_key = f"channe{channel}"
-
-            await self.send_cloud_command(did, {channel_key: True})
-            await self._interruptible_motor_run(channel, did, seconds)
-            await self.send_cloud_command(did, {channel_key: False})
-
-            logger.info("Dose complete.")
-        except asyncio.CancelledError:
-            logger.warning(f"Manual Dose on CH{channel} was cancelled.")
-        except Exception as e:
-            logger.error(f"Dose error: {e}")
-        finally:
-            self._motor_jobs -= 1
-
+    # --- Sequencer Control ---
     def add_sequence_step(self, action_type):
         row = self.seq_table.rowCount()
         self.seq_table.insertRow(row)
@@ -1693,8 +1495,7 @@ class JebaoPumpGUI(QMainWindow):
         # Pump Dropdown
         pump_cb = QComboBox()
         for d in self.cloud_devices:
-            name = d.get("dev_alias") or d.get("mac")
-            pump_cb.addItem(name, userData=d.get("did"))
+            pump_cb.addItem(self.get_device_name(d.get("did")), userData=d.get("did"))
         self.seq_table.setCellWidget(row, 0, pump_cb)
         # Channel Dropdown
         ch_cb = CheckableComboBox()

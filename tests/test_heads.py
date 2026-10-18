@@ -131,3 +131,23 @@ def test_head_names_show_in_labels(pumps):
     assert window.head_label("A", 1) == "JP 1 · CH1"
     window.config.get_pump("A")["display_name"] = "Ethanol pump"
     assert window.get_device_name("A") == "Ethanol pump"
+
+
+def test_a_sequence_dose_shows_as_a_head_run(pumps, qt_loop):
+    window, sent = pumps
+    _, loop = qt_loop
+    window.config.get_pump("A")["calibration"][1] = 60.0  # 1 mL per second
+    steps = [{"pump_did": "A", "channel": [2], "action": "Dose", "val1": 0.4, "val2": 0, "val3": 0}]
+    seen = []
+
+    async def watch():
+        task = asyncio.ensure_future(window._async_run_sequence("test", steps))
+        while not task.done():
+            if window.run_state("A", 2):
+                seen.append(window.run_state("A", 2)[0])
+            await asyncio.sleep(0.05)
+
+    loop.run_until_complete(watch())
+    assert "running" in seen
+    assert ("A", {"channe2": True}) in sent and ("A", {"channe2": False}) in sent
+    assert window.head_runs == {}
