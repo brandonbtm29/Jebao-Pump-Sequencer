@@ -39,6 +39,7 @@ import logging
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import qasync
@@ -99,6 +100,30 @@ def natural_key(text):
     return [
         (0, int(part), "") if part.isdigit() else (1, 0, part.lower()) for part in re.split(r"(\d+)", text)
     ]
+
+
+@dataclass
+class HeadRun:
+    """One pump head (pump id + channel) whose motor is running right now."""
+
+    did: str
+    ch: int
+    duration: float
+    source: str  # "manual", "sequence" or "calibration"
+    remaining: float = 0.0
+    paused: bool = False
+    cancelled: bool = False
+    resume: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def key(self):
+        return (self.did, self.ch)
+
+    @property
+    def progress(self):
+        if self.duration <= 0:
+            return 1.0
+        return max(0.0, min(1.0, 1.0 - self.remaining / self.duration))
 
 
 class _LogBridge(QObject):
@@ -264,6 +289,21 @@ class ConfigManager:
                 json.dump(self.data, f, indent=4)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
+
+    def head_name(self, did, ch):
+        """The name given to a pump head in the Rack tab ("" if none)."""
+        names = self.data.get("pumps", {}).get(did, {}).get("head_names") or []
+        return str(names[ch - 1]).strip() if 0 < ch <= len(names) and names[ch - 1] else ""
+
+    def set_head_name(self, did, ch, name):
+        pump = self.get_pump(did)
+        names = (list(pump.get("head_names") or []) + ["", "", "", ""])[:4]
+        names[ch - 1] = (name or "").strip()
+        pump["head_names"] = names
+
+    def display_name(self, did):
+        """The pump's name in this app, if one was set in the Rack tab ("" if not)."""
+        return str(self.data.get("pumps", {}).get(did, {}).get("display_name") or "").strip()
 
     def get_pump(self, did):
         if did not in self.data["pumps"]:
@@ -637,6 +677,7 @@ class JebaoPumpGUI(QMainWindow):
         self.sequence_queue = []
         self.current_running_sequence = None
         self._motor_jobs = 0  # manual doses and calibration runs in progress
+        self.head_runs = {}  # (did, ch) -> HeadRun for every head whose motor is running
 
         import asyncio
 
@@ -1269,9 +1310,21 @@ class JebaoPumpGUI(QMainWindow):
         try:
             await self.send_cloud_command(did, cmds)
             logger.info(f"Calibration: Motors ON {ch_str}. Waiting 60 seconds...")
-            await asyncio.sleep(60.0)
+            runs = [self._begin_head_run(did, ch + 1, 60.0, "calibration") for ch in channels]
+            try:
+                end = time.time() + 60.0
+                while time.time() < end and not any(r.cancelled for r in runs):
+                    await asyncio.sleep(0.1)
+                    for r in runs:
+                        r.remaining = max(0.0, end - time.time())
+            finally:
+                for r in runs:
+                    self._end_head_run(r)
             await self.send_cloud_command(did, off_cmds)
-            logger.info("Motors OFF. Please enter the measured volumes and click Save.")
+            if any(r.cancelled for r in runs):
+                logger.warning("Calibration run stopped early. Motors OFF; don't use these volumes.")
+            else:
+                logger.info("Motors OFF. Please enter the measured volumes and click Save.")
         except Exception as e:
             logger.error(f"Calibration run failed: {e}")
         finally:
@@ -1531,6 +1584,9 @@ class JebaoPumpGUI(QMainWindow):
         logger.info("Pumps sorted by name.")
 
     def get_device_name(self, did):
+        own = self.config.display_name(did)
+        if own:
+            return own
         for d in self.cloud_devices:
             if d.get("did") == did:
                 return d.get("dev_alias") or d.get("mac")
@@ -2101,32 +2157,155 @@ class JebaoPumpGUI(QMainWindow):
             elapsed = time.time() - start_time
             duration_left -= elapsed
 
-    async def _interruptible_motor_run(self, ch, pump_did, seconds):
+    def _begin_head_run(self, did, ch, seconds, source):
+        run = HeadRun(did=did, ch=ch, duration=float(seconds), remaining=float(seconds), source=source)
+        self.head_runs[run.key] = run
+        return run
+
+    def _end_head_run(self, run):
+        if self.head_runs.get(run.key) is run:
+            del self.head_runs[run.key]
+
+    def head_label(self, did, ch):
+        """'JP 1: EtOH · CH2 (EtOH → Col 2)': pump name, channel and, if set, the head's own name."""
+        name = self.config.head_name(did, ch)
+        text = f"{self.get_device_name(did)} · CH{ch}"
+        return f"{text} ({name})" if name else text
+
+    async def _interruptible_motor_run(self, ch, pump_did, seconds, source="sequence"):
+        """Keep a head's motor on for ``seconds``, honouring pause and cancel.
+
+        A sequence's channel can be paused or cancelled as a whole (``_ch_paused`` /
+        ``_ch_cancelled``); any single head can also be paused or cancelled from the
+        Manual tab (its ``HeadRun``).
+        """
         channel_key = f"channe{ch}"
-        duration_left = seconds
-        self._ch_cancelled[ch] = False
+        by_channel = source == "sequence"
+        if by_channel:
+            self._ch_cancelled[ch] = False
+        run = self._begin_head_run(pump_did, ch, seconds, source)
+        try:
+            while run.remaining > 0:
+                if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
+                    await self.send_cloud_command(pump_did, {channel_key: False})
+                    raise asyncio.CancelledError(f"Channel {ch} dose cancelled.")
 
-        while duration_left > 0:
-            if self._ch_cancelled.get(ch, False):
-                await self.send_cloud_command(pump_did, {channel_key: False})
-                raise asyncio.CancelledError(f"Channel {ch} dose cancelled.")
+                if run.paused or (by_channel and self._ch_paused.get(ch, False)):
+                    await self.send_cloud_command(pump_did, {channel_key: False})
+                    logger.info(f"[{self.head_label(pump_did, ch)}] Paused mid-dose. Waiting to resume...")
+                    if run.paused:
+                        await run.resume.wait()
+                    else:
+                        await self._ch_resume_events[ch].wait()
+                    if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
+                        raise asyncio.CancelledError(f"Channel {ch} dose cancelled while paused.")
+                    logger.info(f"[{self.head_label(pump_did, ch)}] Resuming ({run.remaining:.1f} s left).")
+                    await self.send_cloud_command(pump_did, {channel_key: True})
 
-            if self._ch_paused.get(ch, False):
-                await self.send_cloud_command(pump_did, {channel_key: False})
-                logger.info(f"[CH{ch}] Paused mid-dose! Waiting to resume...")
-                await self._ch_resume_events[ch].wait()
+                chunk = min(0.1, run.remaining)
+                start_time = time.time()
+                await asyncio.sleep(chunk)
+                run.remaining -= time.time() - start_time
+        finally:
+            self._end_head_run(run)
 
-                if self._ch_cancelled.get(ch, False):
-                    raise asyncio.CancelledError(f"Channel {ch} dose cancelled while paused.")
+    # --- Manual dispensing on several heads at once --------------------------------------
 
-                logger.info(f"[CH{ch}] Resuming mid-dose! ({duration_left:.1f}s remaining)")
-                await self.send_cloud_command(pump_did, {channel_key: True})
+    def run_state(self, did, ch):
+        """(state, progress 0-1, seconds left) for a head, or None when its motor is off."""
+        run = self.head_runs.get((did, ch))
+        if run is None:
+            return None
+        paused = run.paused or (run.source == "sequence" and self._ch_paused.get(ch, False))
+        return ("paused" if paused else "running", run.progress, max(0.0, run.remaining))
 
-            chunk = min(0.1, duration_left)
-            start_time = time.time()
-            await asyncio.sleep(chunk)
-            elapsed = time.time() - start_time
-            duration_left -= elapsed
+    def dispense_seconds(self, did, ch, value, unit):
+        """Motor on-time for a dose of ``value`` mL (unit "volume") or ``value`` s (unit "time")."""
+        if unit == "time":
+            return float(value)
+        rate = self.config.get_pump(did)["calibration"][ch - 1]
+        if not rate or rate <= 0:
+            raise ValueError(f"{self.head_label(did, ch)} has no flow rate. Calibrate it first.")
+        return float(value) / rate * 60.0
+
+    def dispense(self, heads, value, unit):
+        """Start dispensing on several heads at once. Returns the started tasks.
+
+        ``heads`` is a list of (did, ch); ``unit`` is "volume" (mL) or "time" (s).
+        Heads that are already running, on an offline pump or without a flow rate are skipped.
+        """
+        online = {d.get("did"): d.get("is_online", True) for d in self.cloud_devices}
+        plan = {}
+        for did, ch in heads:
+            label = self.head_label(did, ch)
+            if (did, ch) in self.head_runs:
+                logger.warning(f"{label} is already running; skipped.")
+                continue
+            if not online.get(did, False):
+                logger.warning(f"{label}: the pump is offline; skipped.")
+                continue
+            try:
+                seconds = self.dispense_seconds(did, ch, value, unit)
+            except ValueError as e:
+                logger.warning(f"{e} Skipped.")
+                continue
+            plan.setdefault(did, []).append((ch, seconds))
+        tasks = []
+        for did, items in plan.items():
+            task = self._start_task(
+                lambda did=did, items=items: self._manual_pump_dispense(did, items, value, unit)
+            )
+            if task is not None:
+                tasks.append(task)
+        return tasks
+
+    async def _manual_pump_dispense(self, did, items, value, unit):
+        """Turn on the given channels of one pump together, then stop each after its own time."""
+        self._motor_jobs += 1
+        try:
+            what = f"{value:g} mL" if unit == "volume" else f"{value:g} s"
+            ok = await self.send_cloud_command(did, {f"channe{ch}": True for ch, _ in items})
+            if not ok:
+                logger.error(f"Couldn't start {self.get_device_name(did)}; nothing was dispensed there.")
+                return
+            for ch, seconds in items:
+                logger.info(f"Dispensing {what} on {self.head_label(did, ch)}: motor on for {seconds:.1f} s.")
+            await asyncio.gather(*(self._manual_head(did, ch, seconds) for ch, seconds in items))
+        finally:
+            self._motor_jobs -= 1
+
+    async def _manual_head(self, did, ch, seconds):
+        label = self.head_label(did, ch)
+        try:
+            await self._interruptible_motor_run(ch, did, seconds, source="manual")
+        except asyncio.CancelledError:
+            logger.warning(f"{label}: dispensing cancelled.")
+            return
+        if await self.send_cloud_command(did, {f"channe{ch}": False}):
+            logger.info(f"{label}: done.")
+        else:
+            logger.error(f"{label}: the STOP command failed. Stop it by hand or with Emergency Stop.")
+
+    def pause_heads(self, heads):
+        for key in heads:
+            run = self.head_runs.get(tuple(key))
+            if run and not run.paused:
+                run.paused = True
+                run.resume.clear()
+
+    def resume_heads(self, heads):
+        for key in heads:
+            run = self.head_runs.get(tuple(key))
+            if run and run.paused:
+                run.paused = False
+                run.resume.set()
+
+    def cancel_heads(self, heads):
+        for key in heads:
+            run = self.head_runs.get(tuple(key))
+            if run:
+                run.cancelled = True
+                run.resume.set()
 
     async def _do_dose(self, r, pump_did, pump_name, channels, val1):
         if not pump_did:
@@ -2204,6 +2383,7 @@ class JebaoPumpGUI(QMainWindow):
 
         if self.sequence_task and not self.sequence_task.done():
             self.sequence_task.cancel()
+        self.cancel_heads(list(self.head_runs))
         asyncio.create_task(self._async_stop_all())
 
     async def _async_stop_all(self):
