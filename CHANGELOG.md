@@ -4,6 +4,30 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-20
+
+A new Calibration tab that works like the Manual tab, with automatic calibration using a balance.
+
+### Added
+- **Automatic calibration with a balance.**
+  - Select heads on the rack (or press **Uncalibrated** or **All**), put their outlets in one beaker on the balance, and press **Calibrate**.
+  - Each head runs on its own until about the chosen volume has arrived, with a settle before and after.
+  - The app compares the **slope rate** (a straight line through the readings, leaving out the start and end) with the **Δmass rate** (mass delivered ÷ density ÷ on-time). A head passes when they agree within 2 % and R² ≥ 0.99, and its Δmass rate is saved. Every limit is adjustable.
+  - Heads that miss are redone (twice by default), then left for you to **Accept** or **Redo**.
+- **Live view.** A chart of mass against time with the fitted line, the current rates, time left, and a results table. You can pause after the current head or stop.
+- **Balances.** Mettler Toledo (MT-SICS, asked for each reading with `SI`) and Bonvoisin (continuous output), at 9600 baud, 8N1. The port list refreshes when you plug the balance in. Needs the new `pyserial` dependency, which an update installs.
+- **A record of every run.** Saved in the data folder under `calibrations/`: one row per try, plus the raw balance readings.
+- **Safety stops.** A head with no flow is marked and skipped. A pump that won't start or stop, or a balance that goes quiet, stops the run. Emergency Stop, or Cancel on that head in the Manual tab, stops it too. Queued sequences wait until the calibration has finished.
+- **Asks before closing.** Closing the app while a sequence, dose or calibration is running now asks first, and stops every pump if you go ahead.
+
+### Changed
+- **Manual (timed run) calibration** now uses the same head selection.
+  - Run any heads, on any pumps, for a set time, then enter what each delivered (mL, or grams of water, ethanol, methanol or isopropanol) and save.
+  - Tubing sizes are no longer asked for; saved values are kept.
+  - Water's density is 0.997 g/mL (it was 1.000).
+- **Tile size** is shared by the Manual and Calibration tabs.
+- A head being calibrated shows as running on the Manual tab. **Cancel** there stops the calibration; **Pause** doesn't apply to it.
+
 ## [2.0.1] - 2026-10-20
 
 ### Fixed
@@ -99,7 +123,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...v1.4.0
