@@ -540,3 +540,16 @@ def test_closing_while_pumping_asks_first(window, monkeypatch):
         window._motor_jobs = 0
     window.close()
     assert not window.isVisible()
+
+
+def test_system_log_can_be_hidden(window):
+    window.show()
+    window.set_log_collapsed(True)
+    assert not window.log_text.isVisible() and window.btn_log_toggle.text() == "▴ Show"
+    jebao_gui.logger.info("Pump JP 1 started.")
+    jebao_gui.QApplication.processEvents()
+    assert "Pump JP 1 started." in window.lbl_log_info.text()  # the latest line stays in view
+    assert window.config.data["ui"]["log_collapsed"] is True  # remembered for next time
+    window.set_log_collapsed(False)
+    assert window.log_text.isVisible() and "Saved on this computer" in window.lbl_log_info.text()
+    assert window.config.data["ui"]["log_collapsed"] is False

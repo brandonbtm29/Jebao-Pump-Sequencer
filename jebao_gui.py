@@ -71,6 +71,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -809,16 +810,22 @@ class JebaoPumpGUI(QMainWindow):
 
         # 4. Bottom Right: System Log (kept on disk, see eventlog.py)
         log_group = QGroupBox("System Log")
+        self.log_group = log_group
         log_layout = QVBoxLayout()
         log_header = QHBoxLayout()
         keep = int(self.config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS))
         self.lbl_log_info = QLabel(f"Saved on this computer for {keep} days (change in Settings).")
         self.lbl_log_info.setStyleSheet("color: grey;")
-        log_header.addWidget(self.lbl_log_info)
-        log_header.addStretch(1)
+        # Ignored width: a long latest line (shown while the log is hidden) is cut off, not widening the window
+        self.lbl_log_info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        log_header.addWidget(self.lbl_log_info, 1)
         btn_log_folder = QPushButton("Open Log Folder")
         btn_log_folder.clicked.connect(self.open_log_folder)
         log_header.addWidget(btn_log_folder)
+        self.btn_log_toggle = QPushButton("▾ Hide")
+        self.btn_log_toggle.setToolTip("Shrink the log to one line to give the tabs more room.")
+        self.btn_log_toggle.clicked.connect(lambda: self.set_log_collapsed(not self.log_collapsed))
+        log_header.addWidget(self.btn_log_toggle)
         log_layout.addLayout(log_header)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -840,6 +847,12 @@ class JebaoPumpGUI(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([640, 170])
         main_layout.addWidget(splitter, 1)
+        self.main_splitter = splitter
+        self.log_collapsed = False
+        self._log_sizes = None
+        self.log_text.textChanged.connect(self._show_last_log_line)
+        if self.config.data.get("ui", {}).get("log_collapsed"):
+            self.set_log_collapsed(True)
 
         # Emergency Stop spanning all
         self.btn_estop = QPushButton("🚨 EMERGENCY STOP ALL PUMPS 🚨")
@@ -865,6 +878,44 @@ class JebaoPumpGUI(QMainWindow):
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
         self.update_clock()
+
+    def set_log_collapsed(self, collapsed):
+        """Shrink the System Log to its header (showing the latest line), or open it again."""
+        if collapsed == self.log_collapsed:
+            return
+        self.log_collapsed = collapsed
+        split = self.main_splitter
+        if collapsed:
+            self._log_sizes = split.sizes()
+        self.log_text.setVisible(not collapsed)
+        self.btn_log_toggle.setText("▴ Show" if collapsed else "▾ Hide")
+        self.btn_log_toggle.setToolTip(
+            "Open the log again." if collapsed else "Shrink the log to one line to give the tabs more room."
+        )
+        if collapsed:
+            self.log_group.setMaximumHeight(self.log_group.sizeHint().height())
+            total = sum(split.sizes())
+            split.setSizes([total - self.log_group.maximumHeight(), self.log_group.maximumHeight()])
+        else:
+            self.log_group.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+            if self._log_sizes and self._log_sizes[1] > 60:
+                split.setSizes(self._log_sizes)
+            else:
+                total = sum(split.sizes())
+                split.setSizes([total - 170, 170])
+        self._show_last_log_line()
+        self.config.data.setdefault("ui", {})["log_collapsed"] = collapsed
+        self.config.save()
+
+    def _show_last_log_line(self):
+        if not self.log_collapsed:
+            keep = int(self.config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS))
+            self.lbl_log_info.setText(f"Saved on this computer for {keep} days (change in Settings).")
+            self.lbl_log_info.setToolTip("")
+            return
+        last = self.log_text.document().lastBlock().text().strip()
+        self.lbl_log_info.setText(last or "No messages yet.")
+        self.lbl_log_info.setToolTip(last)
 
     def open_log_folder(self):
         folder = eventlog.log_dir(DATA_DIR)
