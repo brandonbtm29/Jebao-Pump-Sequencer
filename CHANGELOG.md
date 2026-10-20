@@ -4,6 +4,14 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-20
+
+### Added
+- **Hide** button on the System Log: shrinks it to one line showing the latest message, to give the tabs more room. **Show** opens it again, and the app remembers your choice.
+
+### Changed
+- Calibration tab: the rack, the live chart and the results scroll together in one area, so each gets its full height, instead of being squeezed into a split. The rack's name, the quick-select buttons and the tile size stay at the top.
+
 ## [2.1.0] - 2026-10-20
 
 A new Calibration tab that works like the Manual tab, with automatic calibration using a balance.
@@ -123,7 +131,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...v2.0.0
