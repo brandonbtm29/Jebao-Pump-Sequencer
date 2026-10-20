@@ -127,10 +127,18 @@ class HeadTile(QPushButton):
             w.setStyleSheet(small + " color: grey;")
         self._shown = None
 
-    def show_state(self, name, rate_text, uncalibrated, online, run):
-        """Update the tile; ``run`` is None or (state, progress, seconds_left)."""
+    def show_state(self, name, rate_text, uncalibrated, online, run, status=None):
+        """Update the tile; ``run`` is None or (state, progress, seconds_left).
+
+        ``status`` = (text, color, progress or None) replaces the usual status line (the
+        Calibration tab uses it to show each head's calibration).
+        """
         if not online:
             state, text, color = "offline", "Pump offline", COLORS["offline"]
+        elif status is not None:
+            text, color, progress = status
+            state = "status"
+            run = None if progress is None else ("running", progress, 0)
         elif run is None:
             state = "idle"
             text, color = (
@@ -140,7 +148,16 @@ class HeadTile(QPushButton):
             state, progress, left = run
             color = COLORS[state]
             text = f"{'Running' if state == 'running' else 'Paused'} · {fmt_seconds(left)} left"
-        shown = (name, rate_text, uncalibrated, state, text, self.isChecked(), run and round(run[1], 3))
+        shown = (
+            name,
+            rate_text,
+            uncalibrated,
+            state,
+            text,
+            color,
+            self.isChecked(),
+            run and round(run[1], 3),
+        )
         if shown == self._shown:
             return
         self._shown = shown
@@ -211,6 +228,7 @@ class PumpCard(QFrame):
         self.dot.setStyleSheet(f"color: {COLORS['running'] if online else COLORS['offline']};")
         self.note.setText("" if online else "offline: check its Wi-Fi")
         pump = host.config.get_pump(self.did)
+        status_for = self.tab.status_for
         for tile in self.tiles:
             rate = pump["calibration"][tile.ch - 1]
             tile.show_state(
@@ -219,32 +237,41 @@ class PumpCard(QFrame):
                 is_uncalibrated(pump, tile.ch),
                 online,
                 host.run_state(self.did, tile.ch),
+                status_for(self.did, tile.ch) if status_for else None,
             )
 
 
-class ManualTab(QWidget):
-    """The rack as head tiles. Select heads, then dispense a volume or run them for a time."""
+class HeadGrid(QWidget):
+    """The rack as head tiles that can be selected: shared by the Manual and Calibration tabs.
 
-    def __init__(self, host, parent=None):
+    ``status_for(did, ch)`` (optional) gives a tile's status line; see HeadTile.show_state.
+    Emits ``selection_changed`` when heads are picked or dropped.
+    """
+
+    selection_changed = pyqtSignal()
+
+    def __init__(self, host, hint="", status_for=None, parent=None):
         super().__init__(parent)
         self.host = host
         self.selected = set()
+        self.status_for = status_for
         ui = host.config.data.setdefault("ui", {})
         self.tile_size = ui.get("tile_size", "M") if ui.get("tile_size") in TILE_SIZES else "M"
         self.cards = []
 
-        outer = QHBoxLayout(self)
-        left = QVBoxLayout()
-        top = QHBoxLayout()
+        left = QVBoxLayout(self)
+        left.setContentsMargins(0, 0, 0, 0)
+        self.top = QHBoxLayout()
         self.lbl_layout = QLabel()
         self.lbl_layout.setStyleSheet("font-size: 15px; font-weight: 600;")
-        top.addWidget(self.lbl_layout)
-        hint = QLabel("Click heads to select them, then dispense on the right.")
-        hint.setStyleSheet("color: grey;")
-        top.addWidget(hint)
-        top.addStretch(1)
-        top.addWidget(QLabel("Tile size:"))
+        self.top.addWidget(self.lbl_layout)
+        self.lbl_hint = QLabel(hint)
+        self.lbl_hint.setStyleSheet("color: grey;")
+        self.top.addWidget(self.lbl_hint)
+        self.top.addStretch(1)
+        self.top.addWidget(QLabel("Tile size:"))
         self.size_group = QButtonGroup(self)
+        self.size_buttons = {}
         for key in ("S", "M", "L"):
             b = QPushButton(key)
             b.setCheckable(True)
@@ -256,17 +283,143 @@ class ManualTab(QWidget):
             b.setToolTip({"S": "Small tiles", "M": "Medium tiles", "L": "Large tiles"}[key])
             b.clicked.connect(lambda _c, k=key: self.set_tile_size(k))
             self.size_group.addButton(b)
-            top.addWidget(b)
-        left.addLayout(top)
+            self.size_buttons[key] = b
+            self.top.addWidget(b)
+        left.addLayout(self.top)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         left.addWidget(self.scroll, 1)
-        outer.addLayout(left, 1)
 
+    def rebuild(self):
+        """Recreate the stacks and pump cards (after the layout or the pump list changed)."""
+        layout = self.host.rack_layout()
+        dids = [d.get("did") for d in self.host.cloud_devices]
+        known = set(dids)
+        self.lbl_layout.setText(layout["name"])
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.cards = []
+        groups = [(s["name"], [d for d in s["slots"] if d in known]) for s in layout["stacks"]]
+        extra = rack.unplaced(layout, dids)
+        if extra:
+            groups.append(("Not in the rack (place them in the Rack tab)", extra))
+        for title, members in groups:
+            if not members and title.startswith("Not in"):
+                continue
+            box = QGroupBox(title)
+            col = QVBoxLayout(box)
+            col.setAlignment(Qt.AlignmentFlag.AlignTop)
+            for did in members:
+                card = PumpCard(self, did)
+                col.addWidget(card)
+                self.cards.append(card)
+            if not members:
+                empty = QLabel("No pumps here yet. Add them in the Rack tab.")
+                empty.setStyleSheet("color: grey;")
+                col.addWidget(empty)
+            row.addWidget(box, 1)
+        if not self.cards:
+            msg = QLabel("No pumps yet. Enter your Jebao login in Settings, then press Refresh.")
+            msg.setStyleSheet("color: grey; font-size: 14px;")
+            row.addWidget(msg)
+        self.selected = {k for k in self.selected if k[0] in known}
+        self.scroll.setWidget(container)
+        self.refresh()
+
+    def refresh(self):
+        for card in self.cards:
+            card.refresh()
+
+    def set_tile_size(self, size, save=True):
+        self.tile_size = size
+        if save:
+            self.host.config.data.setdefault("ui", {})["tile_size"] = size
+            self.host.config.save()
+            notify = getattr(self.host, "tile_size_changed", None)
+            if notify:
+                notify(size, self)
+        self.size_buttons[size].setChecked(True)
+        for card in self.cards:
+            for tile in card.tiles:
+                tile.apply_size(size)
+        self.refresh()
+
+    # --- selection ---
+
+    def tiles(self):
+        return [t for c in self.cards for t in c.tiles]
+
+    def set_selected(self, key, on):
+        if on:
+            self.selected.add(key)
+        else:
+            self.selected.discard(key)
+        self.refresh()
+        self.selection_changed.emit()
+
+    def toggle_pump(self, did):
+        tiles = [t for t in self.tiles() if t.did == did and t.isEnabled()]
+        turn_on = not all(t.isChecked() for t in tiles)
+        for t in tiles:
+            t.setChecked(turn_on)
+
+    def clear_selection(self):
+        for t in self.tiles():
+            t.setChecked(False)
+        self.selected.clear()
+        self.refresh()
+        self.selection_changed.emit()
+
+    def select(self, keys):
+        keys = set(keys)
+        for t in self.tiles():
+            t.setChecked((t.did, t.ch) in keys and t.isEnabled())
+
+
+class ManualTab(QWidget):
+    """The rack as head tiles. Select heads, then dispense a volume or run them for a time."""
+
+    def __init__(self, host, parent=None):
+        super().__init__(parent)
+        self.host = host
+        outer = QHBoxLayout(self)
+        self.grid = HeadGrid(host, "Click heads to select them, then dispense on the right.")
+        self.grid.selection_changed.connect(self._update_panel)
+        outer.addWidget(self.grid, 1)
         outer.addWidget(self._build_panel())
         self.rebuild()
+
+    # The grid does the selecting; these keep the tab's own names working.
+    selected = property(lambda self: self.grid.selected)
+    cards = property(lambda self: self.grid.cards)
+    tile_size = property(lambda self: self.grid.tile_size)
+
+    def tiles(self):
+        return self.grid.tiles()
+
+    def set_tile_size(self, size, save=True):
+        self.grid.set_tile_size(size, save)
+
+    def toggle_pump(self, did):
+        self.grid.toggle_pump(did)
+
+    def clear_selection(self):
+        self.grid.clear_selection()
+
+    def select(self, keys):
+        self.grid.select(keys)
+
+    def rebuild(self):
+        self.grid.rebuild()
+        self._update_panel()
+
+    def refresh(self):
+        """Update tiles and the panel from the current runs (called a few times a second)."""
+        self.grid.refresh()
+        self._update_panel()
 
     # --- right-hand panel ---
 
@@ -353,88 +506,6 @@ class ManualTab(QWidget):
 
     def unit(self):
         return "time" if self.rb_time.isChecked() else "volume"
-
-    # --- grid ---
-
-    def rebuild(self):
-        """Recreate the stacks and pump cards (after the layout or the pump list changed)."""
-        layout = self.host.rack_layout()
-        dids = [d.get("did") for d in self.host.cloud_devices]
-        known = set(dids)
-        self.lbl_layout.setText(layout["name"])
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.cards = []
-        groups = [(s["name"], [d for d in s["slots"] if d in known]) for s in layout["stacks"]]
-        extra = rack.unplaced(layout, dids)
-        if extra:
-            groups.append(("Not in the rack (place them in the Rack tab)", extra))
-        for title, members in groups:
-            if not members and title.startswith("Not in"):
-                continue
-            box = QGroupBox(title)
-            col = QVBoxLayout(box)
-            col.setAlignment(Qt.AlignmentFlag.AlignTop)
-            for did in members:
-                card = PumpCard(self, did)
-                col.addWidget(card)
-                self.cards.append(card)
-            if not members:
-                empty = QLabel("No pumps here yet. Add them in the Rack tab.")
-                empty.setStyleSheet("color: grey;")
-                col.addWidget(empty)
-            row.addWidget(box, 1)
-        if not self.cards:
-            msg = QLabel("No pumps yet. Enter your Jebao login in Settings, then press Refresh.")
-            msg.setStyleSheet("color: grey; font-size: 14px;")
-            row.addWidget(msg)
-        self.selected = {k for k in self.selected if k[0] in known}
-        self.scroll.setWidget(container)
-        self.refresh()
-
-    def refresh(self):
-        """Update tiles and the panel from the current runs (called a few times a second)."""
-        for card in self.cards:
-            card.refresh()
-        self._update_panel()
-
-    def set_tile_size(self, size):
-        self.tile_size = size
-        self.host.config.data.setdefault("ui", {})["tile_size"] = size
-        self.host.config.save()
-        for card in self.cards:
-            for tile in card.tiles:
-                tile.apply_size(size)
-        self.refresh()
-
-    # --- selection ---
-
-    def tiles(self):
-        return [t for c in self.cards for t in c.tiles]
-
-    def set_selected(self, key, on):
-        if on:
-            self.selected.add(key)
-        else:
-            self.selected.discard(key)
-        self.refresh()
-
-    def toggle_pump(self, did):
-        tiles = [t for t in self.tiles() if t.did == did and t.isEnabled()]
-        turn_on = not all(t.isChecked() for t in tiles)
-        for t in tiles:
-            t.setChecked(turn_on)
-
-    def clear_selection(self):
-        for t in self.tiles():
-            t.setChecked(False)
-        self.selected.clear()
-        self.refresh()
-
-    def select(self, keys):
-        for t in self.tiles():
-            t.setChecked((t.did, t.ch) in set(keys))
 
     # --- actions ---
 
