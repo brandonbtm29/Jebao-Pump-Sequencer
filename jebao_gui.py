@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -385,6 +386,8 @@ class AppBox(QGroupBox):
         self.main_window = main_window
         self._task = None
         self._progress = None
+        self._progress_timer = None
+        self._cancel = None
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"You are running Jebao Pump Sequencer <b>{__version__}</b>."))
         self.lbl_status = QLabel(
@@ -534,15 +537,49 @@ class AppBox(QGroupBox):
         if save:
             save()
         self.btn_check.setEnabled(False)
-        self._progress = QProgressDialog("Starting…", None, 0, 0, self)
+        self._cancel = threading.Event()
+        self._progress_text = "Starting…"
+        self._progress_started = time.monotonic()
+        self._progress = QProgressDialog("Starting…", "Cancel", 0, 0, self)
         self._progress.setWindowTitle(f"Updating to {release.version}")
         self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._progress.setMinimumDuration(0)
+        self._progress.setMinimumWidth(460)
+        self._progress.setAutoClose(False)
+        self._progress.setAutoReset(False)
+        self._progress.canceled.connect(self._cancel_update)
         self._progress.show()
-        self._start(lambda say: updater.update_to(release.tag, progress=say), self._updated)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._show_progress)
+        self._progress_timer.start(1000)
+        cancel = self._cancel
+        self._start(lambda say: updater.update_to(release.tag, progress=say, cancel=cancel), self._updated)
+
+    def _set_progress(self, text):
+        self._progress_text = text
+        self._show_progress()
+
+    def _show_progress(self):
+        if self._progress is None:
+            return
+        secs = int(time.monotonic() - self._progress_started)
+        self._progress.setLabelText(f"{self._progress_text}\n\n{secs // 60}:{secs % 60:02d} so far")
+
+    def _cancel_update(self):
+        if self._cancel is not None:
+            self._cancel.set()
+        if self._progress is not None:
+            self._progress.show()  # stays up until the update has actually stopped
+            self._progress.setCancelButtonText("Cancelling…")
+            self._progress_text = "Cancelling: putting everything back as it was…"
+            self._show_progress()
 
     def _updated(self, result):
+        if getattr(self, "_progress_timer", None) is not None:
+            self._progress_timer.stop()
+            self._progress_timer = None
         if self._progress is not None:
+            self._progress.canceled.disconnect(self._cancel_update)
             self._progress.close()
             self._progress = None
         self.btn_check.setEnabled(True)
@@ -562,7 +599,7 @@ class AppBox(QGroupBox):
         self._task = _Task(fn, self)
         self._task.done.connect(on_done)
         if self._progress is not None:
-            self._task.progress.connect(self._progress.setLabelText)
+            self._task.progress.connect(self._set_progress)
         self._task.start()
 
 

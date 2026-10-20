@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import json
+import time
 
 import pytest
 
@@ -267,6 +268,37 @@ def test_failed_update_shows_why(window, monkeypatch):
     box = jebao_gui.AppBox(window)
     box._updated(jebao_gui.updater.UpdateResult(False, "Couldn't download the update"))
     assert warnings == ["Couldn't download the update"]
+
+
+def test_update_can_be_cancelled(window, monkeypatch):
+    """The progress box has a Cancel button that stops the update and says so."""
+    warnings = []
+    monkeypatch.setattr(jebao_gui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(window, "restart_app", lambda: pytest.fail("must not restart"))
+
+    def fake_update(tag, progress=None, cancel=None):
+        progress("Installing the new dependencies…\nCollecting hatchling")
+        assert cancel.wait(10)
+        return jebao_gui.updater.UpdateResult(
+            False, "The update was cancelled, so the app was left on the old version."
+        )
+
+    monkeypatch.setattr(jebao_gui.updater, "update_to", fake_update)
+    box = jebao_gui.AppBox(window)
+    box._update(jebao_gui.updater.Release("9.0.0", "v9.0.0", "", "", ""))
+    app = jebao_gui.QApplication.instance()
+    deadline = time.monotonic() + 5
+    while "Collecting hatchling" not in box._progress.labelText() and time.monotonic() < deadline:
+        app.processEvents()
+    assert "so far" in box._progress.labelText()
+    button = box._progress.findChild(jebao_gui.QPushButton)
+    button.click()  # the Cancel button
+    assert "Cancelling" in box._progress.labelText() and box._progress.isVisible()
+    while not warnings and time.monotonic() < deadline + 5:
+        app.processEvents()
+    box._task.wait(2000)
+    assert warnings and "cancelled" in warnings[0]
+    assert box._progress is None and box.btn_check.isEnabled()
 
 
 def test_shortcut_button(window, monkeypatch):

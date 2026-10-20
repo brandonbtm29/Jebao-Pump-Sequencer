@@ -3,6 +3,8 @@
 import os
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 import requests
@@ -182,3 +184,68 @@ def test_local_commits_are_never_overwritten(clone):
     result = updater.update_to("v1.1.0", root=str(work))
     assert not result.ok and "commits that aren't in the release" in result.message
     assert os.path.exists(work / "notes.txt")
+
+
+def _new_deps_release(origin, tag):
+    (origin / "pyproject.toml").write_text(f"deps = {tag}\n")
+    git(origin, "commit", "-q", "-am", f"deps for {tag}")
+    git(origin, "tag", tag)
+
+
+def test_install_output_is_shown_as_it_happens(clone):
+    origin, work = clone
+    _new_deps_release(origin, "v1.2.0")
+    seen = []
+    cmd = [sys.executable, "-c", "print('Collecting hatchling'); print('Successfully installed')"]
+    result = updater.update_to("v1.2.0", root=str(work), install_command=cmd, progress=seen.append)
+    assert result.ok
+    assert any("Collecting hatchling" in s for s in seen)
+
+
+def test_slow_install_times_out_and_rolls_back(clone, monkeypatch):
+    origin, work = clone
+    _new_deps_release(origin, "v1.2.0")
+    monkeypatch.setattr(updater, "INSTALL_TIMEOUT", 1)
+    before = git(work, "rev-parse", "HEAD")
+    started = time.monotonic()
+    result = updater.update_to(
+        "v1.2.0", root=str(work), install_command=[sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    assert time.monotonic() - started < 15
+    assert not result.ok and "took over" in result.message and "left on the old version" in result.message
+    assert git(work, "rev-parse", "HEAD") == before
+
+
+def test_cancel_during_install_rolls_back(clone):
+    origin, work = clone
+    _new_deps_release(origin, "v1.2.0")
+    before = git(work, "rev-parse", "HEAD")
+    cancel = threading.Event()
+
+    def say(msg):
+        if msg.startswith("Installing"):
+            cancel.set()
+
+    cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    result = updater.update_to("v1.2.0", root=str(work), install_command=cmd, progress=say, cancel=cancel)
+    assert not result.ok and "cancelled" in result.message
+    assert git(work, "rev-parse", "HEAD") == before
+
+
+def test_cancel_before_starting_changes_nothing(clone):
+    _, work = clone
+    cancel = threading.Event()
+    cancel.set()
+    before = git(work, "rev-parse", "HEAD")
+    result = updater.update_to("v1.1.0", root=str(work), cancel=cancel)
+    assert not result.ok and "Nothing was changed" in result.message
+    assert git(work, "rev-parse", "HEAD") == before
+
+
+def test_pip_runs_under_python_not_pythonw(tmp_path):
+    (tmp_path / "python.exe").write_text("")
+    (tmp_path / "pythonw.exe").write_text("")
+    assert updater.console_python(str(tmp_path / "pythonw.exe")) == str(tmp_path / "python.exe")
+    assert updater.console_python(str(tmp_path / "python.exe")) == str(tmp_path / "python.exe")
+    assert updater.console_python("/usr/bin/python3") == "/usr/bin/python3"
+    assert "--no-input" in updater.default_install_command()
