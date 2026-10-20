@@ -521,3 +521,22 @@ def test_failed_update_check_in_a_qthread_reaches_the_label(window, qt_loop, mon
         QCoreApplication.processEvents()
     assert "Couldn't reach GitHub" in window.version_button.toolTip()
     assert "Update check: Couldn't reach GitHub" in window.log_text.toPlainText()
+
+
+def test_closing_while_pumping_asks_first(window, monkeypatch):
+    asked = []
+    monkeypatch.setattr(
+        jebao_gui.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or jebao_gui.QMessageBox.StandardButton.No,
+    )
+    window._motor_jobs = 1
+    try:
+        window.show()
+        window.close()
+        assert asked and "Stop every pump" in asked[0]
+        assert window.isVisible()  # still open: the person said No
+    finally:
+        window._motor_jobs = 0
+    window.close()
+    assert not window.isVisible()

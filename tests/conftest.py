@@ -61,4 +61,5 @@ def window(qt_loop, monkeypatch, tmp_path):
     for handler in jebao_gui.logger.handlers[:]:
         if handler not in handlers_before:
             jebao_gui.logger.removeHandler(handler)
+    win._closing = True  # no "pumps are running" question when a test leaves one going
     win.close()

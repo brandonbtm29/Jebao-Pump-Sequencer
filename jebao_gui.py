@@ -30,6 +30,7 @@ import rack
 import settings_location
 import shortcut
 import updater
+from calibration_tab import CalibrationTab
 from rack_widgets import ManualTab, RackTab
 
 APP_DIR = settings_location.app_folder(script_dir)
@@ -58,7 +59,6 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -711,6 +711,7 @@ class JebaoPumpGUI(QMainWindow):
         self.current_running_sequence = None
         self._motor_jobs = 0  # manual doses and calibration runs in progress
         self.head_runs = {}  # (did, ch) -> HeadRun for every head whose motor is running
+        self.data_dir = DATA_DIR
 
         import asyncio
 
@@ -801,7 +802,8 @@ class JebaoPumpGUI(QMainWindow):
         self.manual_tab = ManualTab(self)
         self.tabs.addTab(self.manual_tab, "Manual")
         self.tabs.addTab(self.build_sequencer_page(), "Sequencer")
-        self.tabs.addTab(self.build_calibration_tab(), "Calibration")
+        self.calibration_tab = CalibrationTab(self)
+        self.tabs.addTab(self.calibration_tab, "Calibration")
         self.rack_tab = RackTab(self)
         self.tabs.addTab(self.rack_tab, "Rack")
 
@@ -855,7 +857,7 @@ class JebaoPumpGUI(QMainWindow):
 
         # Tiles and the dispense panel follow the motor runs a few times a second
         self.ui_timer = QTimer(self)
-        self.ui_timer.timeout.connect(self.manual_tab.refresh)
+        self.ui_timer.timeout.connect(self._refresh_visible_tab)
         self.ui_timer.start(300)
 
         # Start Clock Timer
@@ -963,12 +965,40 @@ class JebaoPumpGUI(QMainWindow):
                 "A sequence is running or queued. Wait for it to finish, or press Emergency Stop, "
                 "before updating: restarting mid-dose can leave a pump running."
             )
-        if self._motor_jobs:
+        if self._motor_jobs or self.head_runs:
             return (
                 "A dose or calibration run is in progress. Wait for it to finish, or press Emergency "
                 "Stop, before updating: restarting mid-dose can leave a pump running."
             )
         return ""
+
+    def closeEvent(self, event):
+        """Closing while pumps run would leave them running: offer to stop them first."""
+        busy = self.busy_reason()
+        if not busy or getattr(self, "_closing", False):
+            if hasattr(self, "calibration_tab") and self.calibration_tab.bal is not None:
+                self.calibration_tab.bal.close()
+            event.accept()
+            return
+        event.ignore()
+        reply = QMessageBox.question(
+            self,
+            "Pumps are running",
+            "A sequence, dose or calibration is still running. Closing now would leave pumps "
+            "running.\n\nStop every pump and quit?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._closing = True
+        self._start_task(self._stop_then_close)
+
+    async def _stop_then_close(self):
+        await self.emergency_stop_all()
+        cal = getattr(self, "calibration_tab", None)
+        if cal is not None and cal.task is not None and not cal.task.done():
+            await asyncio.wait({cal.task}, timeout=15)  # let it send its own OFF too
+        self.close()
 
     def save_before_restart(self):
         if hasattr(self, "seq_table"):
@@ -1054,250 +1084,6 @@ class JebaoPumpGUI(QMainWindow):
         page.addWidget(self.build_sequencer_tab())
         page.setSizes([260, 900])
         return page
-
-    def build_calibration_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        info = QLabel(
-            "<b>Calibration Procedure:</b><br>"
-            "Because the MD-4.4 dosing pumps operate at a fixed physical speed, flow rate cannot be altered.<br>"
-            "To ensure accurate volume dosing, you must calibrate the flow rate (mL/min) for each channel.<br>"
-            "1. Select channels below.<br>2. Click 'Run Selected Channels for 60s' into graduated cylinders or scales.<br>"
-            "3. Enter the measured volumes and tubing sizes, then click Save."
-        )
-        layout.addWidget(info)
-
-        ctrl_layout = QHBoxLayout()
-        ctrl_layout.addWidget(QLabel("Select Pump:"))
-        self.cal_pump_combo = QComboBox()
-        self.cal_pump_combo.currentIndexChanged.connect(self.update_cal_labels)
-        ctrl_layout.addWidget(self.cal_pump_combo)
-        ctrl_layout.addStretch()
-        layout.addLayout(ctrl_layout)
-
-        # --- Mass-to-Volume Density Selector ---
-        density_layout = QHBoxLayout()
-        density_layout.addWidget(QLabel("Input Mode:"))
-        self.cal_input_mode = QComboBox()
-        self.cal_input_mode.addItems(["Volume (mL)", "Mass (g)"])
-        self.cal_input_mode.currentIndexChanged.connect(self.on_cal_mode_changed)
-        density_layout.addWidget(self.cal_input_mode)
-
-        self.lbl_liquid = QLabel("Liquid Type:")
-        density_layout.addWidget(self.lbl_liquid)
-
-        self.cal_liquid_type = QComboBox()
-        self.cal_liquid_type.addItems(
-            ["Water (1.000 g/mL)", "Ethanol (0.789 g/mL)", "Methanol (0.792 g/mL)", "Custom Density"]
-        )
-        self.cal_liquid_type.currentIndexChanged.connect(self.on_cal_mode_changed)
-        density_layout.addWidget(self.cal_liquid_type)
-
-        self.cal_custom_density = QDoubleSpinBox()
-        self.cal_custom_density.setRange(0.001, 20.0)
-        self.cal_custom_density.setDecimals(3)
-        self.cal_custom_density.setValue(1.000)
-        self.cal_custom_density.setSuffix(" g/mL")
-        density_layout.addWidget(self.cal_custom_density)
-        density_layout.addStretch()
-
-        # Initially hide density controls since default is Volume
-        self.lbl_liquid.setVisible(False)
-        self.cal_liquid_type.setVisible(False)
-        self.cal_custom_density.setVisible(False)
-        layout.addLayout(density_layout)
-
-        grid = QGridLayout()
-        self.cal_checkboxes = []
-        self.cal_vol_spins = []
-        self.cal_id_spins = []
-        self.cal_od_spins = []
-        self.cal_rate_labels = []
-        self.cal_meas_labels = []
-
-        for i in range(4):
-            ch_num = i + 1
-            frame = QFrame()
-            frame.setFrameShape(QFrame.Shape.StyledPanel)
-            flayout = QVBoxLayout(frame)
-
-            cb = QCheckBox(f"Channel {ch_num}")
-            cb.setStyleSheet("font-weight: bold;")
-            self.cal_checkboxes.append(cb)
-            flayout.addWidget(cb)
-
-            lbl_rate = QLabel("Rate: ? mL/min")
-            lbl_rate.setStyleSheet("color: #E2E2E2; font-style: italic;")
-            self.cal_rate_labels.append(lbl_rate)
-            flayout.addWidget(lbl_rate)
-
-            # Tubing inputs
-            h1 = QHBoxLayout()
-            h1.addWidget(QLabel("ID (mm):"))
-            id_spin = QDoubleSpinBox()
-            id_spin.setRange(0.1, 20.0)
-            id_spin.setValue(2.0)
-            self.cal_id_spins.append(id_spin)
-            h1.addWidget(id_spin)
-            flayout.addLayout(h1)
-
-            h2 = QHBoxLayout()
-            h2.addWidget(QLabel("OD (mm):"))
-            od_spin = QDoubleSpinBox()
-            od_spin.setRange(0.1, 20.0)
-            od_spin.setValue(4.0)
-            self.cal_od_spins.append(od_spin)
-            h2.addWidget(od_spin)
-            flayout.addLayout(h2)
-
-            # Volume input
-            h3 = QHBoxLayout()
-            lbl_meas = QLabel("Meas Vol (mL):")
-            self.cal_meas_labels.append(lbl_meas)
-            h3.addWidget(lbl_meas)
-            vol_spin = QDoubleSpinBox()
-            vol_spin.setRange(0.1, 999.9)
-            vol_spin.setValue(60.0)
-            self.cal_vol_spins.append(vol_spin)
-            h3.addWidget(vol_spin)
-            flayout.addLayout(h3)
-
-            grid.addWidget(frame, 0, i)
-
-        layout.addLayout(grid)
-
-        btn_layout = QHBoxLayout()
-        self.btn_cal_run = QPushButton("Run Selected Channels for 60s")
-        self.btn_cal_run.setStyleSheet("background-color: #28A745; color: white; font-weight: bold;")
-        self.btn_cal_run.clicked.connect(self.run_calibration)
-        btn_layout.addWidget(self.btn_cal_run)
-
-        self.btn_cal_save = QPushButton("Save Calibration")
-        self.btn_cal_save.clicked.connect(self.save_calibration)
-        btn_layout.addWidget(self.btn_cal_save)
-
-        layout.addLayout(btn_layout)
-        layout.addStretch()
-        return widget
-
-    def on_cal_mode_changed(self):
-        is_mass = self.cal_input_mode.currentText() == "Mass (g)"
-
-        self.lbl_liquid.setVisible(is_mass)
-        self.cal_liquid_type.setVisible(is_mass)
-
-        is_custom = is_mass and ("Custom" in self.cal_liquid_type.currentText())
-        self.cal_custom_density.setVisible(is_custom)
-
-        label_text = "Meas Mass (g):" if is_mass else "Meas Vol (mL):"
-        for lbl in self.cal_meas_labels:
-            lbl.setText(label_text)
-
-    def update_cal_labels(self):
-        did = self.cal_pump_combo.currentData()
-        if not did:
-            for lbl in self.cal_rate_labels:
-                lbl.setText("Rate: ? mL/min")
-            return
-
-        p = self.config.get_pump(did)
-        for i in range(4):
-            rate = p["calibration"][i]
-            self.cal_rate_labels[i].setText(f"Rate: {rate:.3f} mL/min")
-            self.cal_id_spins[i].setValue(p["tubing_id"][i])
-            self.cal_od_spins[i].setValue(p["tubing_od"][i])
-
-    def run_calibration(self):
-        did = self.cal_pump_combo.currentData()
-        if not did:
-            return
-
-        channels_to_run = [i for i, cb in enumerate(self.cal_checkboxes) if cb.isChecked()]
-        if not channels_to_run:
-            QMessageBox.warning(self, "No Channels", "Please select at least one channel to calibrate.")
-            return
-
-        self.btn_cal_run.setEnabled(False)
-        asyncio.create_task(self._async_calibration_run(did, channels_to_run))
-
-    async def _async_calibration_run(self, did, channels):
-        cmds = {f"channe{ch + 1}": True for ch in channels}
-        off_cmds = {f"channe{ch + 1}": False for ch in channels}
-        ch_str = ", ".join([str(ch + 1) for ch in channels])
-        self._motor_jobs += 1
-        try:
-            await self.send_cloud_command(did, cmds)
-            logger.info(f"Calibration: Motors ON {ch_str}. Waiting 60 seconds...")
-            runs = [self._begin_head_run(did, ch + 1, 60.0, "calibration") for ch in channels]
-            try:
-                end = time.time() + 60.0
-                while time.time() < end and not any(r.cancelled for r in runs):
-                    await asyncio.sleep(0.1)
-                    for r in runs:
-                        r.remaining = max(0.0, end - time.time())
-            finally:
-                for r in runs:
-                    self._end_head_run(r)
-            await self.send_cloud_command(did, off_cmds)
-            if any(r.cancelled for r in runs):
-                logger.warning("Calibration run stopped early. Motors OFF; don't use these volumes.")
-            else:
-                logger.info("Motors OFF. Please enter the measured volumes and click Save.")
-        except Exception as e:
-            logger.error(f"Calibration run failed: {e}")
-        finally:
-            self._motor_jobs -= 1
-            self.btn_cal_run.setEnabled(True)
-
-    def save_calibration(self):
-        did = self.cal_pump_combo.currentData()
-        if not did:
-            return
-
-        p = self.config.get_pump(did)
-        saved_any = False
-
-        is_mass = self.cal_input_mode.currentText() == "Mass (g)"
-        density = 1.000
-        if is_mass:
-            liq = self.cal_liquid_type.currentText()
-            if "Water" in liq:
-                density = 1.000
-            elif "Ethanol" in liq:
-                density = 0.789
-            elif "Methanol" in liq:
-                density = 0.792
-            else:
-                density = self.cal_custom_density.value()
-
-        for i, cb in enumerate(self.cal_checkboxes):
-            if cb.isChecked():
-                val = self.cal_vol_spins[i].value()
-                if is_mass:
-                    vol = val / density
-                    logger.info(f"CH{i + 1}: Converted {val}g / {density:.3f}g/mL = {vol:.3f}mL")
-                else:
-                    vol = val
-
-                rate = vol  # 60s run means vol == mL/min
-                p["calibration"][i] = rate
-                dates = (list(p.get("calibrated_at") or []) + [None] * 4)[:4]
-                dates[i] = datetime.now().strftime("%Y-%m-%d")
-                p["calibrated_at"] = dates
-                p["tubing_id"][i] = self.cal_id_spins[i].value()
-                p["tubing_od"][i] = self.cal_od_spins[i].value()
-                saved_any = True
-                logger.info(
-                    f"Saved CH{i + 1}: Rate {rate:.3f} mL/min, ID {p['tubing_id'][i]}mm, OD {p['tubing_od'][i]}mm"
-                )
-
-        if saved_any:
-            self.config.save()
-            self.update_cal_labels()
-            QMessageBox.information(self, "Saved", "Calibration saved for selected channels.")
-        else:
-            QMessageBox.warning(self, "No Channels", "Check the boxes for the channels you want to save.")
 
     def build_sequencer_tab(self):
         widget = QWidget()
@@ -1484,18 +1270,6 @@ class JebaoPumpGUI(QMainWindow):
             key=lambda d: order.index(d.get("did")) if d.get("did") in order else len(order)
         )
 
-        if hasattr(self, "cal_pump_combo"):
-            current = self.cal_pump_combo.currentData()
-            self.cal_pump_combo.blockSignals(True)
-            self.cal_pump_combo.clear()
-            for d in self.cloud_devices:
-                self.cal_pump_combo.addItem(self.get_device_name(d.get("did")), d.get("did"))
-            idx = self.cal_pump_combo.findData(current)
-            if idx >= 0:
-                self.cal_pump_combo.setCurrentIndex(idx)
-            self.cal_pump_combo.blockSignals(False)
-            self.update_cal_labels()
-
         # Re-populate sequence table if it's empty
         if hasattr(self, "seq_table") and self.seq_table.rowCount() == 0:
             if self.config.data.get("sequence"):
@@ -1503,8 +1277,43 @@ class JebaoPumpGUI(QMainWindow):
 
         if hasattr(self, "manual_tab"):
             self.manual_tab.rebuild()
+        if hasattr(self, "calibration_tab"):
+            self.calibration_tab.rebuild()
         if hasattr(self, "rack_tab"):
             self.rack_tab.rebuild()
+
+    def tile_size_changed(self, size, source):
+        """Tile size picked in one tab: use it in the other one too."""
+        for tab in (getattr(self, "manual_tab", None), getattr(self, "calibration_tab", None)):
+            grid = getattr(tab, "grid", None)
+            if grid is not None and grid is not source:
+                grid.set_tile_size(size, save=False)
+
+    def _refresh_visible_tab(self):
+        """Tiles and panels follow the motor runs a few times a second (only the tab in view)."""
+        self.calibration_tab._watch_cancel()
+        current = self.tabs.currentWidget()
+        if current in (self.manual_tab, self.calibration_tab):
+            current.refresh()
+
+    def calibration_running(self):
+        tab = getattr(self, "calibration_tab", None)
+        return bool(tab and tab.running())
+
+    async def set_head(self, did, ch, on):
+        """Turn one head on or off. True when the pump took the command."""
+        return await self.send_cloud_command(did, {f"channe{ch}": bool(on)})
+
+    def save_head_rate(self, did, ch, rate, how):
+        """Store a head's flow rate (mL/min) and today's date, and say so in the log."""
+        pump = self.config.get_pump(did)
+        old = pump["calibration"][ch - 1]
+        pump["calibration"][ch - 1] = round(float(rate), 4)
+        dates = (list(pump.get("calibrated_at") or []) + [None] * 4)[:4]
+        dates[ch - 1] = datetime.now().strftime("%Y-%m-%d")
+        pump["calibrated_at"] = dates
+        self.config.save()
+        logger.info(f"Saved {self.head_label(did, ch)}: {rate:.3f} mL/min (was {old:.3f}), from {how}.")
 
     def get_device_name(self, did):
         own = self.config.display_name(did)
@@ -1718,11 +1527,19 @@ class JebaoPumpGUI(QMainWindow):
             self.seq_table.selectRow(row + 1)
 
     async def _queue_worker(self):
+        told = False
         while True:
             if not self.sequence_queue:
                 self.current_running_sequence = None
                 await asyncio.sleep(0.5)
                 continue
+            if self.calibration_running():
+                if not told:
+                    logger.info("A sequence is queued: it will start when the calibration has finished.")
+                    told = True
+                await asyncio.sleep(0.5)
+                continue
+            told = False
 
             seq_item = self.sequence_queue.pop(0)
             seq_name = seq_item["name"]
@@ -2127,6 +1944,11 @@ class JebaoPumpGUI(QMainWindow):
     def pause_heads(self, heads):
         for key in heads:
             run = self.head_runs.get(tuple(key))
+            if run and run.source == "calibration":
+                logger.warning(
+                    f"{self.head_label(*run.key)} is being calibrated: use Stop in the Calibration tab."
+                )
+                continue
             if run and not run.paused:
                 run.paused = True
                 run.resume.clear()
@@ -2222,7 +2044,9 @@ class JebaoPumpGUI(QMainWindow):
         if self.sequence_task and not self.sequence_task.done():
             self.sequence_task.cancel()
         self.cancel_heads(list(self.head_runs))
-        asyncio.create_task(self._async_stop_all())
+        if hasattr(self, "calibration_tab"):
+            self.calibration_tab.stop()
+        return asyncio.create_task(self._async_stop_all())
 
     async def _async_stop_all(self):
         tasks = []
@@ -2237,6 +2061,10 @@ class JebaoPumpGUI(QMainWindow):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         failed = [self.get_device_name(did) for did, ok in zip(dids, results, strict=True) if ok is not True]
+        stopped = {did for did, ok in zip(dids, results, strict=True) if ok is True}
+        for run in list(self.head_runs.values()):  # a calibration head whose own OFF had failed
+            if run.source == "calibration" and run.did in stopped and not self.calibration_running():
+                self._end_head_run(run)
         if failed:
             logger.error(
                 f"STOP FAILED for {len(failed)} of {len(dids)} pump(s): {', '.join(failed)}. "

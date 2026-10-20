@@ -147,7 +147,8 @@ def test_names_are_saved_and_shown(bench):
     assert window.get_device_name("D2") == "Water pump"
     assert window.config.head_name("D2", 3) == "Water → Col 3"
     assert tile(window, "D2", 3).lbl_name.text() == "Water → Col 3"
-    assert window.cal_pump_combo.findText("Water pump") >= 0
+    cal_tile = next(t for t in window.calibration_tab.grid.tiles() if (t.did, t.ch) == ("D2", 3))
+    assert cal_tile.lbl_name.text() == "Water → Col 3"
 
 
 def _drop_event(did):
