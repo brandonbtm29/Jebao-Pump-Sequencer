@@ -4,6 +4,14 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-20
+
+### Fixed
+- Updating could sit on "Updating…" for up to 15 minutes with no sign of progress, mostly on Windows, where the app runs without a console. The dependency install now runs under the normal `python.exe` and never waits for input. It also shows what it's doing as it goes, along with how long it has been running, and gives up after 10 minutes (downloading after 2). Anything that stops it puts the app back on the old version.
+
+### Added
+- A **Cancel** button while updating. It stops the update and leaves the app exactly as it was.
+
 ## [2.0.0] - 2026-10-17
 
 A new layout built around the rack of pumps. Your login, calibrations, pump order and saved sequences carry over; the pumps start in one stack in your old order until you arrange them in the Rack tab.
@@ -91,7 +99,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v1.2.0...v1.3.0
