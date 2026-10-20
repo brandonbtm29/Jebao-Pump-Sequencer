@@ -34,7 +34,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -72,7 +71,7 @@ class MassChart(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(130)
+        self.setMinimumHeight(220)
         self.points = []  # (seconds from pump on, grams above the starting mass)
         self.ignore = (None, None)  # (start, end) of the stretch used for the fit
         self.fit = None  # (slope g/s, intercept g) over that stretch
@@ -142,7 +141,7 @@ class MassChart(QWidget):
         p.drawText(
             QRectF(area.left(), 0, area.width(), top - 2),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            "Grams added · blue band = part used for the fitted line",
+            "Grams added · blue = part used for the fit",
         )
         # data
         p.setPen(QPen(QColor(GREEN), 2))
@@ -174,8 +173,9 @@ class CalibrationTab(QWidget):
         self.settings = autocal.Settings.from_dict(cfg.get("settings"))
 
         outer = QHBoxLayout(self)
-        split = QSplitter(Qt.Orientation.Vertical)
-        self.grid = HeadGrid(host, "Select the heads to calibrate.", status_for=self.tile_status)
+        self.grid = HeadGrid(
+            host, "Select the heads to calibrate.", status_for=self.tile_status, scroll=False
+        )
         self.grid.selection_changed.connect(self.update_panel)
         for text, tip, fn in (
             ("Uncalibrated", "Select every head that has never been calibrated.", self.select_uncalibrated),
@@ -186,13 +186,24 @@ class CalibrationTab(QWidget):
             b.setToolTip(tip)
             b.clicked.connect(fn)
             self.grid.top.insertWidget(2 + ["Uncalibrated", "All", "None"].index(text), b)
-        split.addWidget(self.grid)
+        # The rack, the live view and the results scroll together; the toolbar stays put.
+        left = QVBoxLayout()
+        left.addWidget(self.grid.toolbar)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        col = QVBoxLayout(content)
+        col.setContentsMargins(0, 0, 4, 0)
+        col.addWidget(self.grid)
         self.run_area = self._build_run_area()
-        split.addWidget(self.run_area)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([380, 260])
-        outer.addWidget(split, 1)
+        self.run_area.setMinimumHeight(430)
+        col.addWidget(self.run_area)
+        col.addStretch(1)
+        self.scroll.setWidget(content)
+        left.addWidget(self.scroll, 1)
+        outer.addLayout(left, 1)
         outer.addWidget(self._build_panel())
         self.rebuild()
 
@@ -317,7 +328,7 @@ class CalibrationTab(QWidget):
         self._cell(form, 0, 1, "Longest run", self.spin_max)
         self.chk_autosave = QCheckBox("Save passing heads automatically")
         self.chk_autosave.setChecked(s.auto_save)
-        self.chk_autosave.setText("Save passing\nheads automatically")
+        self.chk_autosave.setText("Auto-save\npassing heads")
         form.addWidget(self.chk_autosave, 4, 1)
         for w in (
             self.spin_volume,

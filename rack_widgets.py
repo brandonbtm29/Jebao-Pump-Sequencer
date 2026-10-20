@@ -250,18 +250,24 @@ class HeadGrid(QWidget):
 
     selection_changed = pyqtSignal()
 
-    def __init__(self, host, hint="", status_for=None, parent=None):
+    def __init__(self, host, hint="", status_for=None, scroll=True, parent=None):
+        """``scroll=False``: no scroll bar of its own, for a tab that scrolls the grid
+        together with other things. ``toolbar`` (name, hint, tile size) can then be placed
+        above that tab's scroll area so it stays in view."""
         super().__init__(parent)
         self.host = host
         self.selected = set()
         self.status_for = status_for
+        self._container = None
         ui = host.config.data.setdefault("ui", {})
         self.tile_size = ui.get("tile_size", "M") if ui.get("tile_size") in TILE_SIZES else "M"
         self.cards = []
 
         left = QVBoxLayout(self)
         left.setContentsMargins(0, 0, 0, 0)
-        self.top = QHBoxLayout()
+        self.toolbar = QWidget()
+        self.top = QHBoxLayout(self.toolbar)
+        self.top.setContentsMargins(0, 0, 0, 0)
         self.lbl_layout = QLabel()
         self.lbl_layout.setStyleSheet("font-size: 15px; font-weight: 600;")
         self.top.addWidget(self.lbl_layout)
@@ -285,12 +291,17 @@ class HeadGrid(QWidget):
             self.size_group.addButton(b)
             self.size_buttons[key] = b
             self.top.addWidget(b)
-        left.addLayout(self.top)
+        left.addWidget(self.toolbar)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left.addWidget(self.scroll, 1)
+        if scroll:
+            self.scroll = QScrollArea()
+            self.scroll.setWidgetResizable(True)
+            self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+            left.addWidget(self.scroll, 1)
+        else:
+            self.scroll = None
+            self.body = QVBoxLayout()
+            left.addLayout(self.body)
 
     def rebuild(self):
         """Recreate the stacks and pump cards (after the layout or the pump list changed)."""
@@ -326,7 +337,14 @@ class HeadGrid(QWidget):
             msg.setStyleSheet("color: grey; font-size: 14px;")
             row.addWidget(msg)
         self.selected = {k for k in self.selected if k[0] in known}
-        self.scroll.setWidget(container)
+        if self.scroll is not None:
+            self.scroll.setWidget(container)
+        else:
+            if self._container is not None:
+                self._container.hide()
+                self._container.deleteLater()
+            self.body.addWidget(container)
+        self._container = container
         self.refresh()
 
     def refresh(self):

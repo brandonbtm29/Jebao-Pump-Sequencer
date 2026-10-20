@@ -330,3 +330,11 @@ def test_manual_rates_use_the_time_that_ran(rig, monkeypatch):
     tab.run_manual()
     tab.manual_table.cellWidget(0, 1).setValue(1.0)
     assert tab.manual_table.item(0, 2).text() == "2.000"  # 1 mL in 30 s
+
+
+def test_rack_and_results_scroll_together(rig):
+    tab = rig.tab
+    assert tab.grid.scroll is None  # no scroll bar of its own
+    content = tab.scroll.widget()
+    assert content.isAncestorOf(tab.grid) and content.isAncestorOf(tab.run_area)
+    assert not content.isAncestorOf(tab.grid.toolbar)  # tile size and quick picks stay in view
