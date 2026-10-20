@@ -13,7 +13,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **Manual tab, the whole rack at a glance**: every pump appears where it sits on the bench, with its four heads as tiles showing the head's name, flow rate and what it's doing (idle, running with time left, paused, offline, not calibrated yet). Tile size S / M / L fits small and large screens.
 - **Dose many heads at once**: click heads (or **All 4** on a pump) to select them, then dispense a volume (mL) or run them for a time (s). Each head runs for its own calibrated time; all start together. Pause, resume or cancel the selected heads.
 - **Rack tab, your physical setup**: choose how many stacks and pumps per stack, drag pumps into place (or **Auto-arrange A→Z**: JP 2 comes before JP 10), and give each pump and head a name, like "Water → Col 3". Other people can set up their own rigs the same way.
-- **Calibration**: run a channel for 60 seconds, type in the volume or mass you collected (water, ethanol, methanol or a custom density), and the app saves that channel's flow rate, the tubing size and the date.
+- **Automatic calibration with a balance**: pick the heads on the rack, put their outlets in one beaker on a Mettler Toledo or Bonvoisin balance, and press Calibrate. The heads run one after another; for each, the app compares the flow rate from the fitted line with the rate from the total mass, and saves it when they agree within 2 % and R² ≥ 0.99 (both adjustable). Heads that don't pass are redone, then left for you to Accept or Redo. Every run is saved as a CSV, with the raw readings.
+- **Manual calibration**: or run the selected heads for a set time (60 s by default), type in the volume or mass each one delivered, and save.
 - **Sequences**: build a table of steps (Dose, Staccato, Pause, Pause for user review, Wait for all, Run sub-sequence) across any of your pumps, save it under a name, and reuse it. Saved sequences and the queue are in the Sequencer tab.
 - **Channels run side by side**: each channel works through its own steps at the same time as the others. "Wait for All" lines them up again, and async doses run in the background.
 - **Queue**: line up several saved sequences and they run one after another.
@@ -23,6 +24,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **Shared settings**: keep your login, calibrations, layout, names and sequences in a synced folder so every computer uses the same ones.
 - **Version and updates**: the version is shown in the bottom-right corner. When a newer release is out it turns orange ("Update available"); click it to see what changed and update. It won't update while a sequence, dose or calibration is running.
 - **Desktop shortcut**: the app puts an icon on your desktop the first time it starts and refreshes it after each update. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock. You can turn this off in Settings.
+
+![Calibration tab: heads picked on the rack, a live mass-against-time chart for the head being calibrated, the results table, and the balance and run settings](docs/screenshot-calibration.png)
 
 ![Rack tab: two stacks of five pumps, the Not placed list, and the names of one pump's heads](docs/screenshot-rack.png)
 
@@ -34,6 +37,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - Windows 10/11 or macOS (Linux works for development)
 - Pumps already connected to Wi-Fi and added to a Jebao account in the **Jebao Aqua** phone app
 - An internet connection: the app controls the pumps through the Jebao cloud, not over your local network
+- For automatic calibration (optional): a balance with a serial or USB connection. Mettler Toledo balances (MT-SICS) work as they are; Bonvoisin and similar balances need continuous output turned on. Both at 9600 baud, reading in grams.
 
 ## Install
 
@@ -64,7 +68,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 1. Click **Settings** and enter the email and password of your Jebao account. Choose a theme and text size if you like.
 2. The app logs in and shows your pumps in the **Manual** tab, using the names you gave them in the phone app. At first they are all in one stack.
 3. Open the **Rack** tab and arrange them as they sit on your bench: set the number of stacks and pumps per stack, then drag each pump into its place (or press **Auto-arrange A→Z**). Click a pump to name it and its heads.
-4. Calibrate each head you plan to use (**Calibration** tab). Until you do, the app assumes 1 mL/min and marks the head "not calibrated", so volume doses would be wrong.
+4. Calibrate each head you plan to use (**Calibration** tab: **Uncalibrated** selects the ones that still need it). Until you do, the app assumes 1 mL/min and marks the head "not calibrated", so volume doses would be wrong.
 5. In **Manual**, select a head, try a small dose, then build a sequence in **Sequencer**.
 
 Coming from 1.x? Your login, calibrations, pump order and saved sequences carry over. The pumps start in one stack in your old order until you arrange them in the Rack tab.
@@ -88,7 +92,7 @@ The app keeps two settings files:
 | File | What's in it | Example |
 |---|---|---|
 | `secrets.json` | Your Jebao login | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, tubing sizes, Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 
@@ -96,6 +100,8 @@ You don't need to write either file yourself. The app creates them when you save
 - **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump`. Set `UAKRON_APP_DATA_DIR` to use a different folder; the app creates it if it is missing. Its `logs/` folder holds two kinds of log:
   - the **system log** you see in the window, one file per day per computer (`events-YYYY-MM-DD-<computer>.log`), kept for 30 days by default. **Open Log Folder** in the log box opens it.
   - the **error log**, `jebao_pump_sequencer.log`, with tracebacks of errors. An unexpected error is shown in a dialog instead of closing the app.
+
+  Its `calibrations/` folder keeps a CSV of every automatic calibration (`autocal-<date-time>.csv`, one row per try) and the raw balance readings next to it (`…_raw.csv`).
 
 ## How it works
 
@@ -105,7 +111,9 @@ You don't need to write either file yourself. The app creates them when you save
 
 Once a Jebao pump is on Wi-Fi it only takes commands from the cloud service behind the Jebao app (Gizwits). The app logs in with your account, lists the pumps bound to it, and turns channels on and off with commands like `{"attrs": {"channe1": true}}`. "channe" is the API's own spelling.
 
-A dose of *V* mL turns the channel on, waits *V ÷ flow rate* minutes, then turns it off. Flow rates come from calibration. Network calls run in the background (PyQt6 with an asyncio loop through `qasync`), so the window stays responsive.
+A dose of *V* mL turns the channel on, waits *V ÷ flow rate* minutes, then turns it off. Flow rates come from calibration.
+
+Automatic calibration runs each head until about the chosen volume has reached the balance, timing it the same way a dose is timed (from the pump confirming ON to sending OFF). The **Δmass rate** (mass delivered ÷ density ÷ on-time) is what a timed dose really gives, so that is the rate saved. The **slope rate** (a straight line through the readings, leaving out the first and last few seconds) is the check: if the two disagree, something like a slow start, a drip or a bubble spoiled the run. Network calls run in the background (PyQt6 with an asyncio loop through `qasync`), so the window stays responsive.
 
 ## Limitations
 

@@ -16,5 +16,11 @@
         {"pump_did": "EXAMPLEDID0000000001", "channel": [1], "action": "Dose", "val1": 5.0, "val2": 0, "val3": 0},
         {"pump_did": "EXAMPLEDID0000000001", "channel": [1], "action": "Pause", "val1": 30.0, "val2": 0, "val3": 0}
     ],
-    "saved_sequences": {}
+    "saved_sequences": {},
+    "autocal": {
+        "brand": "mettler",
+        "port": "COM4",
+        "liquid": "Water",
+        "settings": {"volume_ml": 10.0, "density": 0.997, "settle_s": 5.0, "ignore_s": 3.0, "tolerance_pct": 2.0, "min_r2": 0.99, "retries": 2, "max_run_s": 600.0, "auto_save": true}
+    }
 }
