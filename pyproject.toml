@@ -15,6 +15,7 @@ dependencies = [
     "PyQt6>=6.5",
     "qasync>=0.27",
     "requests>=2.31",
+    "pyserial>=3.5", # reading a balance for automatic calibration
 ]
 keywords = ["jebao", "dosing pump", "gizwits", "pyqt6", "laboratory automation"]
 classifiers = [
@@ -43,7 +44,7 @@ jebao-pump = "jebao_gui:main"
 path = "jebao_gui.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["jebao_gui.py", "settings_location.py", "crash_log.py", "updater.py", "shortcut.py", "eventlog.py", "rack.py", "rack_widgets.py", "assets"]
+only-include = ["jebao_gui.py", "settings_location.py", "crash_log.py", "updater.py", "shortcut.py", "eventlog.py", "rack.py", "rack_widgets.py", "balance.py", "autocal.py", "calibration_tab.py", "assets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
