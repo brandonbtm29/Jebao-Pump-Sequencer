@@ -121,7 +121,9 @@ def test_a_full_run_saves_the_rates(rig, qt_loop):
     # a record of the run is kept in the data folder
     assert tab.csv_path and os.path.exists(tab.csv_path)
     rows = list(csv.reader(open(tab.csv_path, encoding="utf-8")))
-    assert rows[3][2] == "1" and rows[3][12] == "True"
+    row = dict(zip(rows[2], rows[3], strict=True))
+    assert row["channel"] == "1" and row["passed"] == "True"
+    assert float(row["flow_rate_mL_min"]) == pytest.approx(0.04 / 0.997 * 60, rel=0.01)
 
 
 def test_failed_head_can_be_accepted_or_redone(rig, qt_loop, monkeypatch):

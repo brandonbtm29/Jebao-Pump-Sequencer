@@ -76,10 +76,13 @@ class MassChart(QWidget):
         self.ignore = (None, None)  # (start, end) of the stretch used for the fit
         self.fit = None  # (slope g/s, intercept g) over that stretch
         self.title = ""
+        self.markers = []
         self.setAccessibleName("Mass against time for the current calibration run")
 
-    def set_data(self, points, ignore=(None, None), fit=None, title=""):
+    def set_data(self, points, ignore=(None, None), fit=None, title="", markers=()):
+        """``markers``: [(seconds, label)] drawn as dashed lines (when ON and OFF were sent)."""
         self.points, self.ignore, self.fit, self.title = points, ignore, fit, title
+        self.markers = list(markers)
         self.update()
 
     def paintEvent(self, _event):
@@ -91,7 +94,7 @@ class MassChart(QWidget):
         grid.setAlpha(40)
         faint = QColor(fg)
         faint.setAlpha(140)
-        left, top, right, bottom = 52, 20, 12, 20
+        left, top, right, bottom = 62, 20, 12, 20
         area = QRectF(left, top, max(10, self.width() - left - right), max(10, self.height() - top - bottom))
         p.setPen(QPen(grid))
         p.drawRect(area)
@@ -131,18 +134,29 @@ class MassChart(QWidget):
             pt = xy(t0, g)
             p.drawText(QRectF(0, pt.y() - 8, left - 6, 16), Qt.AlignmentFlag.AlignRight, f"{g:.2f} g")
         p.drawText(
-            QRectF(area.left(), area.bottom() + 4, area.width(), 18), Qt.AlignmentFlag.AlignLeft, "0 s"
+            QRectF(area.left(), area.bottom() + 4, area.width(), 18),
+            Qt.AlignmentFlag.AlignLeft,
+            f"{t0:.0f} s",
         )
         p.drawText(
             QRectF(area.left(), area.bottom() + 4, area.width(), 18),
             Qt.AlignmentFlag.AlignRight,
-            f"{t1:.0f} s",
+            f"{t1:.0f} s  (0 = ON)",
         )
         p.drawText(
             QRectF(area.left(), 0, area.width(), top - 2),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             "Grams added · blue = part used for the fit",
         )
+        # when ON and OFF were sent
+        for t, label in self.markers:
+            if t0 <= t <= t1:
+                pen = QPen(faint, 1)
+                pen.setStyle(Qt.PenStyle.DotLine)
+                p.setPen(pen)
+                x = xy(t, g0).x()
+                p.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
+                p.drawText(QRectF(x + 3, area.top() + 2, 40, 14), Qt.AlignmentFlag.AlignLeft, label)
         # data
         p.setPen(QPen(QColor(GREEN), 2))
         pts = [xy(t, g) for t, g in self.points]
@@ -198,7 +212,7 @@ class CalibrationTab(QWidget):
         col.setContentsMargins(0, 0, 4, 0)
         col.addWidget(self.grid)
         self.run_area = self._build_run_area()
-        self.run_area.setMinimumHeight(430)
+        self.run_area.setMinimumHeight(520)
         col.addWidget(self.run_area)
         col.addStretch(1)
         self.scroll.setWidget(content)
@@ -305,7 +319,10 @@ class CalibrationTab(QWidget):
         self._cell(form, 1, 0, "Liquid", self.combo_liquid)
         self._cell(form, 1, 1, "Density", self.spin_density)
         self.spin_settle = self._dspin(1, 120, 0, s.settle_s, " s")
-        self.spin_settle.setToolTip("Wait this long with the pumps still before and after each run.")
+        self.spin_settle.setToolTip(
+            "Wait at least this long before and after each run. If the reading is still changing "
+            "(a pump that stopped late, a drip), it waits until it is still."
+        )
         self._cell(form, 2, 0, "Settle before/after", self.spin_settle)
         self.spin_ignore = self._dspin(0, 60, 0, s.ignore_s, " s")
         self.spin_ignore.setToolTip(
@@ -313,8 +330,11 @@ class CalibrationTab(QWidget):
         )
         self._cell(form, 2, 1, "Ignore start/end", self.spin_ignore)
         self.spin_tol = self._dspin(0.1, 50, 1, s.tolerance_pct, " %")
-        self.spin_tol.setToolTip("The slope rate and the Δmass rate must agree within this.")
-        self._cell(form, 3, 0, "Rates agree within", self.spin_tol)
+        self.spin_tol.setToolTip(
+            "The flow must be steady: lines fitted to the first and second half of the run "
+            "must agree within this."
+        )
+        self._cell(form, 3, 0, "Steady within", self.spin_tol)
         self.spin_r2 = self._dspin(0.5, 1.0, 3, s.min_r2, "")
         self.spin_r2.setSingleStep(0.001)
         self._cell(form, 3, 1, "Minimum R²", self.spin_r2)
@@ -439,9 +459,9 @@ class CalibrationTab(QWidget):
         self.stat_labels = {}
         for key, title in (
             ("mass", "Added"),
-            ("slope", "Slope rate"),
+            ("slope", "Flow rate"),
             ("r2", "Fit R²"),
-            ("dmass", "Δmass rate"),
+            ("delays", "Start / stop delay"),
         ):
             col = QVBoxLayout()
             t = QLabel(title)
@@ -459,20 +479,36 @@ class CalibrationTab(QWidget):
         rv = QVBoxLayout(res)
         self.results_table = QTableWidget(0, 8)
         self.results_table.setHorizontalHeaderLabels(
-            ["Head", "Slope", "Δmass", "Diff", "R²", "Old", "Result", ""]
+            ["Head", "Rate", "R²", "Steady", "Delays", "Old", "Result", ""]
         )
+        for col, tip in enumerate(
+            [
+                "",
+                "Flow rate in mL/min: the slope of the fitted line. This is what gets saved.",
+                "How well a straight line fits the readings.",
+                "How much the first and second half of the run differed.",
+                "How late the pump really started / stopped after the app sent ON / OFF "
+                "(cloud delays; shown, not counted against the head).",
+                "The rate saved before.",
+                "",
+            ]
+        ):
+            if tip:
+                self.results_table.horizontalHeaderItem(col).setToolTip(tip)
         self.results_table.verticalHeader().setVisible(False)
         self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         hdr = self.results_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        self.results_table.setColumnWidth(7, 150)
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.results_table.setColumnWidth(0, 130)
+        self.results_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         rv.addWidget(self.results_table, 1)
         note = QLabel(
-            "Rates in mL/min. Δmass rate = mass delivered ÷ density ÷ on-time: the one saved, since "
-            "it is what a timed dose really gives. Slope rate = fitted line."
+            "Rate = slope of the fitted line (mL/min), saved when R² and Steady pass. Delays = how "
+            "late the pump started / stopped after ON / OFF, from where the line meets the mass "
+            "before and after: cloud delays, which change from command to command."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: grey; font-size: 11px;")
@@ -982,7 +1018,10 @@ class CalibrationTab(QWidget):
             return
         pts = [(t - a.t_on, g - a.start_g) for t, g, _st in samples]
         end = (a.t_off or self.cal.clock()) - a.t_on
-        lo, hi = s.ignore_s, end - s.ignore_s
+        if a.fit_t0 is not None:  # after the run: the stretch the result was worked out from
+            lo, hi = a.fit_t0 - a.t_on, a.fit_t1 - a.t_on
+        else:
+            lo, hi = s.ignore_s, end - s.ignore_s
         fit = None
         window = [(t, g) for t, g in pts if lo <= t <= hi]
         if len(window) >= 5 and window[-1][0] - window[0][0] >= 2:
@@ -991,7 +1030,12 @@ class CalibrationTab(QWidget):
             live_slope, live_r2 = slope / s.density * 60, r2
         else:
             live_slope = live_r2 = None
-        self.chart.set_data(pts, (lo, hi) if hi > lo else (None, None), fit)
+        self.chart.set_data(
+            pts,
+            (lo, hi) if hi > lo else (None, None),
+            fit,
+            markers=[(0.0, "ON")] + ([(end, "OFF")] if a.t_off else []),
+        )
         self._stats(a, (live_slope, live_r2))
 
     def _stats(self, a, live):
@@ -1004,17 +1048,19 @@ class CalibrationTab(QWidget):
         self.stat_labels["mass"].setText(f"{added:.2f} mL")
         slope = a.slope_rate if a.slope_rate is not None else (live[0] if live else None)
         r2 = a.r2 if a.r2 is not None else (live[1] if live else None)
-        self.stat_labels["slope"].setText(fmt_rate(slope))
+        self.stat_labels["slope"].setText(fmt_rate(slope) + (" mL/min" if slope is not None else ""))
         self.stat_labels["r2"].setText("—" if r2 is None else f"{r2:.4f}")
-        self.stat_labels["dmass"].setText(
-            fmt_rate(a.dmass_rate) if a.dmass_rate is not None else "after stop"
+        self.stat_labels["delays"].setText(
+            "after stop"
+            if a.start_delay is None
+            else f"{round(a.start_delay) + 0:+d} / {round(a.stop_delay) + 0:+d} s"
         )
 
     def _fill_results(self):
         cal = self.cal
         rows = cal.results if cal else []
         shown = tuple(
-            (r.key, r.status, len(r.attempts), r.rate, r.last and r.last.diff_pct, r.note) for r in rows
+            (r.key, r.status, len(r.attempts), r.rate, r.last and r.last.steady_pct, r.note) for r in rows
         )
         if shown == self._table_shown:
             return
@@ -1034,14 +1080,17 @@ class CalibrationTab(QWidget):
             b = r.best
             tries = f" ({len(r.attempts)} tries)" if len(r.attempts) > 1 else ""
             text, color = names.get(r.status, (r.status, GREY))
-            if r.status == autocal.FAILED and r.note:
-                text = f"Failed{tries}: {r.note}"
+            if r.status == autocal.FAILED:
+                text = f"Failed{tries}"
+            tip = r.note or text
             values = [
                 f"{self.host.get_device_name(r.did)} · CH{r.ch}",
                 fmt_rate(b.slope_rate) if b else "—",
-                fmt_rate(b.dmass_rate) if b else "—",
-                "—" if not b or b.diff_pct is None else f"{b.diff_pct:.1f} %",
                 "—" if not b or b.r2 is None else f"{b.r2:.4f}",
+                "—" if not b or b.steady_pct is None else f"{b.steady_pct:.1f} %",
+                "—"
+                if not b or b.start_delay is None
+                else f"{round(b.start_delay) + 0:+d} / {round(b.stop_delay) + 0:+d} s",
                 fmt_rate(r.old_rate),
                 text,
             ]
@@ -1051,9 +1100,17 @@ class CalibrationTab(QWidget):
                     item.setToolTip(r.label)
                 if col == 6:
                     item.setForeground(QColor(color))
-                    item.setToolTip(val)
-                if col == 3 and b and b.diff_pct is not None and b.diff_pct > cal.settings.tolerance_pct:
+                    item.setToolTip(tip)
+                if col == 3 and b and b.steady_pct is not None and b.steady_pct > cal.settings.tolerance_pct:
                     item.setForeground(QColor(RED))
+                if col == 2 and b and b.r2 is not None and b.r2 < cal.settings.min_r2:
+                    item.setForeground(QColor(RED))
+                if col == 4 and b and b.delay_note:
+                    item.setForeground(QColor(AMBER))
+                    item.setToolTip(
+                        f"The pump {b.delay_note} (Δmass over the commanded time: "
+                        f"{fmt_rate(b.dmass_rate)} mL/min). Timed doses are off by about this much."
+                    )
                 t.setItem(i, col, item)
             t.setCellWidget(i, 7, self._actions(r))
 
