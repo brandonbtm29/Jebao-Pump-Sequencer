@@ -4,6 +4,23 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-21
+
+### Changed
+- **Automatic calibration now saves the flow rate from the fitted line (the slope).** It used to save the Δmass rate (mass delivered ÷ commanded on-time).
+  - Real runs showed the pumps starting up to 11 s late and stopping up to 19 s late after the app sent ON and OFF. These delays changed from one command to the next, so the Δmass rate of one head moved 16 % between tries while its slope moved 0.7 %.
+  - The slope is the pump's own rate; the delays come from the cloud, not the pump.
+- **A head passes when the line fits well (R² ≥ 0.99) and the flow was steady.** Steady means lines through the first and second half of the run agree within the tolerance (2 % by default).
+  - Before, a head had to have its slope and Δmass rate agree, which mostly measured cloud delays.
+  - The tolerance setting is now called **Steady within**. A saved value carries over.
+- **The ignore margins are counted from when the flow really started and stopped**, not from when ON and OFF were sent, so a late start or stop can't put still readings into the fit.
+- **Before and after each head, the routine waits until the balance reading is still**, not just for the settle time. A pump that stops late, or a drip, can no longer spill into the next head or the end mass.
+- **The results table shows** Rate, R², Steady and **Delays**, the start/stop delay of each head; long delays are shown in amber, with a tooltip.
+- **The CSV adds** the delays, the steadiness and the stretch used for the fit. The Δmass rate stays in it, for the record.
+
+### Fixed
+- The calibration chart's time axis started at "0 s" although it begins with the settle before ON. It now shows the real times, with dotted lines where ON and OFF were sent.
+
 ## [2.2.0] - 2026-10-20
 
 ### Added
@@ -131,7 +148,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.0...v2.0.1
