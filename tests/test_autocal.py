@@ -87,15 +87,16 @@ def test_settings_round_trip():
 class Rig:
     """A fast clock, a pretend balance and pretend pumps (one flow rate per head)."""
 
-    def __init__(self, rates, noise=0.0, start_delay=0.0, ack_ok=True, off_ok=True):
+    def __init__(self, rates, noise=0.0, start_delay=0.0, stop_delay=0.0, ack_ok=True, off_ok=True):
         self.t = 0.0
         self.bal = autocal_balance = balance.SimulatedBalance(clock=self.clock, noise=noise)
         autocal_balance.tick()
         self.rates = rates  # (did, ch) -> g/s
-        self.start_delay = start_delay
+        self.start_delay, self.stop_delay = start_delay, stop_delay
         self.ack_ok, self.off_ok = ack_ok, off_ok
         self.commands = []
-        self.on_at = None
+        self.on_at = self.off_at = None
+        self.change_at = None  # (time after ON, new g/s): flow that changes mid-run
         self.saved = {}
 
     def clock(self):
@@ -107,6 +108,11 @@ class Rig:
             self.t += dt / steps
             if self.on_at is not None and self.t >= self.on_at:
                 self.bal.flowing = True
+                if self.change_at and self.t >= self.on_at + self.change_at[0]:
+                    self.bal.rate_g_s = self.change_at[1]
+            if self.off_at is not None and self.t >= self.off_at:
+                self.bal.flowing = False
+                self.on_at = self.off_at = None
             self.bal.tick()
         await asyncio.sleep(0)
 
@@ -120,8 +126,11 @@ class Rig:
             return True
         if not self.off_ok:
             return False
-        self.on_at = None
-        self.bal.flowing = False
+        if self.stop_delay:
+            self.off_at = self.t + self.stop_delay  # the cloud passes OFF on late
+        else:
+            self.on_at = None
+            self.bal.flowing = False
         return True
 
     def save(self, did, ch, rate):
@@ -163,17 +172,43 @@ def test_without_auto_save_it_waits_for_you():
     assert cal.results[0].status == autocal.PASSED and rig.saved == {}
 
 
-def test_a_late_starting_pump_shows_up_as_rates_apart_and_is_retried():
-    # The pump starts 3 s after it says ON: a short run then delivers noticeably less
-    # than the steady flow suggests, so the two rates disagree.
-    rig = Rig({("A", 1): 0.04}, start_delay=3.0)
-    cal = run(rig.calibrator(volume_ml=0.5, ignore_s=1.0, retries=2))
+def test_cloud_delays_are_measured_and_dont_change_the_rate():
+    # Like Brandon's CH4: the pump starts 5 s after ON is confirmed and keeps going 19 s
+    # after OFF is sent. The flow rate (slope) is still right, the delays are reported,
+    # and the Δmass rate (commanded time) shows the mismatch for the record.
+    rig = Rig({("A", 1): 0.55}, noise=0.003, start_delay=5.0, stop_delay=19.0)
+    cal = run(rig.calibrator(volume_ml=100, ignore_s=15, settle_s=30, tolerance_pct=2))
     r = cal.results[0]
-    assert r.status == autocal.FAILED
-    assert len(r.attempts) == 3  # first try plus two redos
-    assert r.last.diff_pct > 2 and "apart" in r.note
-    assert rig.saved == {}
-    assert r.rate is not None  # still shown, for Accept
+    a = r.last
+    assert r.status == autocal.SAVED and len(r.attempts) == 1
+    assert a.slope_rate == pytest.approx(0.55 / 0.997 * 60, rel=0.002)
+    assert rig.saved[("A", 1)] == pytest.approx(a.slope_rate)
+    assert a.start_delay == pytest.approx(5.0, abs=0.3)
+    assert a.stop_delay == pytest.approx(19.0, abs=0.3)
+    assert a.dmass_rate > a.slope_rate * 1.05  # 14 s of extra flow over a ~3 min run
+    assert a.delay_note == "started 5 s late, stopped 19 s late"
+    # the end mass was taken after the late stop, so nothing was missed
+    assert a.end_g - a.start_g == pytest.approx(0.55 * (a.on_time + 14), rel=0.005)
+
+
+def test_late_stop_longer_than_settle_is_waited_out():
+    # Settle is 5 s but the pump only stops 19 s after OFF: the routine keeps waiting
+    # until the reading is still, so the next head starts on a still balance.
+    rig = Rig({("A", 1): 0.1, ("A", 2): 0.1}, stop_delay=19.0)
+    cal = run(rig.calibrator(volume_ml=5, settle_s=5, ignore_s=2))
+    first, second = cal.results
+    assert first.status == second.status == autocal.SAVED
+    assert first.last.stop_delay == pytest.approx(19.0, abs=0.5)
+    assert second.last.start_delay == pytest.approx(0.0, abs=0.5)
+
+
+def test_flow_that_changes_mid_run_fails():
+    rig = Rig({("A", 1): 0.05})
+    rig.change_at = (60.0, 0.04)  # e.g. a bubble or the tubing slipping, a minute in
+    cal = run(rig.calibrator(volume_ml=6, ignore_s=3, retries=0))
+    r = cal.results[0]
+    assert r.status == autocal.FAILED and "first and second half" in r.note
+    assert r.last.steady_pct > 2
 
 
 def test_noisy_balance_fails_on_r2():

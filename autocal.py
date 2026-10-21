@@ -11,16 +11,23 @@ For each head:
    the pump confirms ON to the moment OFF is sent.
 3. **Settle** again, then average a couple of seconds of readings: the end mass.
 
-Two flow rates come out of it:
+What comes out of it:
 
-- **Δmass rate** = (end mass − starting mass) ÷ density ÷ on-time. This is what a dose of
-  that length really delivers, so it is the rate that gets saved.
-- **Slope rate** = a straight line fitted to mass against time while the pump runs,
-  ignoring the first and last ``ignore_s`` seconds (start-up, drips).
+- **Flow rate** = the slope of a straight line fitted to mass against time while the
+  pump runs, leaving out the first and last ``ignore_s`` seconds of the flow. This is the
+  pump's own rate, and it is what gets saved.
+- **Start and stop delay**: where that line meets the starting mass and the end mass
+  shows when the pump really started and stopped, compared with when the app sent ON
+  and OFF. These are delays in the cloud, not in the pump, and they change from one
+  command to the next, so they are shown but don't fail a head.
+- **Δmass rate** = (end mass − starting mass) ÷ density ÷ commanded on-time, for the
+  record. It differs from the flow rate by exactly those delays.
 
-The head passes when the two agree within ``tolerance_pct`` and the line fits well
-(R² ≥ ``min_r2``). Otherwise it is redone, up to ``retries`` more times; after that you
-decide (Accept or Redo). No Qt here: the pump and the balance are passed in, so the
+The head passes when the line fits well (R² ≥ ``min_r2``) and the flow was steady: lines
+fitted to the first and second half of the run agree within ``tolerance_pct``. Otherwise
+it is redone, up to ``retries`` more times; after that you decide (Accept or Redo).
+Before and after each run the routine waits until the balance reading is still, so a
+pump that stops late can't spill into the next head. No Qt here: the pump and the balance are passed in, so the
 whole routine can be tested with a pretend balance and a fast clock.
 """
 
@@ -41,6 +48,10 @@ LIQUIDS = {  # name -> density (g/mL) near room temperature
     "Isopropanol": 0.786,
 }
 AVERAGE_S = 2.0  # seconds of readings averaged for the starting and end mass
+STILL_G_S = 0.01  # the balance counts as still below this drift (g/s) ...
+STILL_FRACTION = 0.02  # ... or below 2 % of the flow just measured, whichever is larger
+STILL_EXTRA_S = 90.0  # wait at most this much longer than settle_s for it to be still
+DELAY_WARN_S = 3.0  # mention start/stop delays longer than this
 NO_FLOW_AFTER_S = 20.0  # if almost nothing has arrived by then, stop and say so
 NO_FLOW_G = 0.05
 
@@ -109,10 +120,16 @@ class Attempt:
     t_off: float = 0.0
     start_g: float = 0.0
     end_g: float = 0.0
-    slope_rate: float | None = None  # mL/min
-    dmass_rate: float | None = None  # mL/min
-    diff_pct: float | None = None
+    slope_rate: float | None = None  # mL/min: the flow rate (saved)
+    dmass_rate: float | None = None  # mL/min over the commanded on-time (for the record)
+    diff_pct: float | None = None  # slope vs Δmass rate, %: the delays as a share of the run
     r2: float | None = None
+    steady_pct: float | None = None  # first-half vs second-half slope, %
+    start_delay: float | None = None  # s from ON (confirmed) to the flow really starting
+    stop_delay: float | None = None  # s from OFF (sent) to the flow really stopping
+    fit_t0: float | None = None  # stretch used for the line
+    fit_t1: float | None = None
+    still: bool = True  # the balance settled before the end mass was taken
     passed: bool = False
     problem: str = ""
     can_retry: bool = False  # a tolerance or R² miss (worth another try), not a broken setup
@@ -126,40 +143,94 @@ class Attempt:
     def volume_ml(self):
         return None if self.dmass_rate is None else self.dmass_rate * self.on_time / 60.0
 
+    @property
+    def delay_note(self):
+        """'started 5 s late, stopped 19 s late' when the cloud was slow, else ''."""
+        parts = []
+        for name, d in (("started", self.start_delay), ("stopped", self.stop_delay)):
+            if d is not None and abs(d) >= DELAY_WARN_S:
+                parts.append(f"{name} {abs(d):.0f} s {'late' if d > 0 else 'early'}")
+        return ", ".join(parts)
+
+
+def _signed(x):
+    """'+5.0', '-1.2', '+0.0' (never '-0.0')."""
+    return f"{0.0 if abs(x) < 0.05 else x:+.1f}"
+
+
+def _points(samples, t0, t1):
+    return [(t, g) for t, g, _st in samples if t0 <= t <= t1]
+
+
+def _enough(points):
+    return len(points) >= 5 and points[-1][0] - points[0][0] >= 2.0
+
 
 def evaluate(attempt, settings):
-    """Work out both rates and whether they agree. Fills in ``attempt``; returns it."""
+    """Fit the line, find the delays and check the flow was steady. Fills in
+    ``attempt`` and returns it."""
     s = settings
-    on = attempt.on_time
+    a = attempt
+    on = a.on_time
     if on <= 0:
-        attempt.problem = "The pump didn't run."
-        return attempt
-    delivered_g = attempt.end_g - attempt.start_g
-    attempt.dmass_rate = delivered_g / s.density / on * 60.0
-    window = [
-        (t, g)
-        for t, g, _st in attempt.samples
-        if attempt.t_on + s.ignore_s <= t <= attempt.t_off - s.ignore_s
-    ]
-    if len(window) < 5 or window[-1][0] - window[0][0] < 2.0:
-        attempt.problem = "Too few balance readings while the pump ran to fit a line. Run longer."
-        return attempt
-    slope, _b, r2 = fit_line([t for t, _ in window], [g for _, g in window])
-    attempt.slope_rate = slope / s.density * 60.0
-    attempt.r2 = r2
-    if attempt.dmass_rate <= 0:
-        attempt.problem = "The mass didn't go up."
-        return attempt
-    attempt.diff_pct = abs(attempt.slope_rate - attempt.dmass_rate) / attempt.dmass_rate * 100.0
+        a.problem = "The pump didn't run."
+        return a
+    delivered_g = a.end_g - a.start_g
+    a.dmass_rate = delivered_g / s.density / on * 60.0
+    if delivered_g <= 0:
+        a.problem = "The mass didn't go up."
+        return a
+    # First pass: margins counted from when ON and OFF were sent.
+    pts = _points(a.samples, a.t_on + s.ignore_s, a.t_off - s.ignore_s)
+    if not _enough(pts):
+        a.problem = "Too few balance readings while the pump ran to fit a line. Run longer."
+        return a
+    slope, icpt, r2 = fit_line([t for t, _ in pts], [g for _, g in pts])
+    if slope <= 0:
+        a.problem = "The mass didn't go up while the pump ran."
+        return a
+    # Where the line meets the starting and end mass: when the flow really started and
+    # stopped. Second pass: the same margins, counted from those moments instead, so a
+    # late start or stop can't put still readings into the fit (or leave good ones out).
+    t_start = (a.start_g - icpt) / slope
+    t_stop = (a.end_g - icpt) / slope
+    lo = min(max(t_start, a.t_on - 10.0), a.t_off) + s.ignore_s
+    hi = max(min(t_stop, a.t_off + 120.0), a.t_on) - s.ignore_s
+    pts2 = _points(a.samples, lo, hi)
+    if _enough(pts2):
+        pts = pts2
+        slope, icpt, r2 = fit_line([t for t, _ in pts], [g for _, g in pts])
+        t_start = (a.start_g - icpt) / slope
+        t_stop = (a.end_g - icpt) / slope
+    a.fit_t0, a.fit_t1 = pts[0][0], pts[-1][0]
+    a.slope_rate = slope / s.density * 60.0
+    a.r2 = r2
+    a.start_delay = t_start - a.t_on
+    a.stop_delay = t_stop - a.t_off
+    a.diff_pct = abs(a.slope_rate - a.dmass_rate) / a.slope_rate * 100.0
+    # Steady flow: lines through the first and second half should agree.
+    mid = (a.fit_t0 + a.fit_t1) / 2
+    first = [p for p in pts if p[0] <= mid]
+    second = [p for p in pts if p[0] > mid]
     problems = []
-    if attempt.diff_pct > s.tolerance_pct:
-        problems.append(f"rates {attempt.diff_pct:.1f} % apart (limit {s.tolerance_pct:g} %)")
+    if _enough(first) and _enough(second):
+        s1 = fit_line([t for t, _ in first], [g for _, g in first])[0]
+        s2 = fit_line([t for t, _ in second], [g for _, g in second])[0]
+        a.steady_pct = abs(s1 - s2) / slope * 100.0
+        if a.steady_pct > s.tolerance_pct:
+            problems.append(
+                f"flow changed {a.steady_pct:.1f} % between the first and second half (limit {s.tolerance_pct:g} %)"
+            )
+    else:
+        problems.append("too few readings to check the flow was steady (run longer)")
     if r2 < s.min_r2:
         problems.append(f"R² {r2:.4f} below {s.min_r2:g}")
-    attempt.problem = "; ".join(problems)
-    attempt.passed = not problems
-    attempt.can_retry = bool(problems)
-    return attempt
+    if not a.still:
+        problems.append("the balance never settled after the run")
+    a.problem = "; ".join(problems)
+    a.passed = not problems
+    a.can_retry = bool(problems)
+    return a
 
 
 # Head outcomes
@@ -195,20 +266,22 @@ class HeadResult:
 
     @property
     def best(self):
-        """The attempt to use: the passing one, else the one with the closest rates."""
-        done = [a for a in self.attempts if a.dmass_rate is not None]
+        """The attempt to use: the passing one, else the steadiest one."""
+        done = [a for a in self.attempts if a.slope_rate is not None]
         if not done:
             return None
         passing = [a for a in done if a.passed]
         if passing:
             return passing[-1]
-        return min(done, key=lambda a: a.diff_pct if a.diff_pct is not None else float("inf"))
+        return min(
+            done, key=lambda a: (a.steady_pct if a.steady_pct is not None else float("inf"), -(a.r2 or 0))
+        )
 
     @property
     def rate(self):
-        """The rate that would be saved (Δmass rate of the best attempt)."""
+        """The rate that would be saved: the flow rate (slope) of the best attempt."""
         b = self.best
-        return b.dmass_rate if b else None
+        return b.slope_rate if b else None
 
 
 class Stopped(Exception):
@@ -353,7 +426,7 @@ class AutoCalibrator:
             if best is not None and best.passed:
                 if s.auto_save and self.save:
                     try:
-                        self.save(result.did, result.ch, best.dmass_rate)
+                        self.save(result.did, result.ch, best.slope_rate)
                         result.status = SAVED
                     except Exception as e:  # noqa: BLE001 - e.g. the settings file can't be written
                         result.status = PASSED
@@ -382,7 +455,7 @@ class AutoCalibrator:
     async def _one_run(self, result, attempt):
         s = self.settings
         t_start = self.clock()
-        await self._wait(s.settle_s, "settling")
+        await self._settle("settling", None)
         attempt.start_g, n = mean_between(self.balance.samples(), self.clock() - AVERAGE_S, self.clock())
         if n == 0:
             raise RuntimeError("No balance readings. Check that it is connected and sending.")
@@ -419,13 +492,43 @@ class AutoCalibrator:
         if attempt.problem:
             attempt.samples = self.balance.samples(since=t_start)
             raise HeadProblem(attempt.problem)
-        await self._wait(s.settle_s, "settling after")
+        flow_g_s = (self._recent_mass() - attempt.start_g) / max(attempt.on_time, 1e-9)
+        attempt.still = await self._settle("settling after", flow_g_s)
         t0 = self.clock()
         await self._wait(AVERAGE_S, "settling after")
         attempt.end_g, n = mean_between(self.balance.samples(), t0, self.clock())
         if n == 0:
             raise RuntimeError("No balance readings after the run.")
         attempt.samples = self.balance.samples(since=t_start)
+
+    def _recent_mass(self, seconds=1.0):
+        now = self.clock()
+        m, n = mean_between(self.balance.samples(since=now - seconds), now - seconds, now)
+        last = self.balance.latest()
+        return m if n else (last[1] if last else 0.0)
+
+    def _drift(self, seconds=3.0):
+        """g/s the reading is changing by over the last few seconds (None if too few)."""
+        now = self.clock()
+        pts = _points(self.balance.samples(since=now - seconds), now - seconds, now)
+        if not _enough(pts):
+            return None
+        return fit_line([t for t, _ in pts], [g for _, g in pts])[0]
+
+    async def _settle(self, phase, flow_g_s):
+        """Wait ``settle_s``, then on until the reading is still (a pump that stops late,
+        or a drip). Gives up after STILL_EXTRA_S more; returns False then."""
+        await self._wait(self.settings.settle_s, phase)
+        limit = max(STILL_G_S, STILL_FRACTION * abs(flow_g_s or 0.0))
+        give_up = self.clock() + STILL_EXTRA_S
+        while True:
+            drift = self._drift()
+            if drift is not None and abs(drift) <= limit:
+                return True
+            if self.clock() >= give_up:
+                log.warning("The balance reading didn't settle (still changing %.3f g/s).", drift or 0.0)
+                return False
+            await self._wait(0.5, phase)
 
     async def _turn_off(self, result):
         for _ in range(3):
@@ -438,9 +541,11 @@ class AutoCalibrator:
         if a.slope_rate is None:
             log.warning("Calibration %s (try %d of %d): %s", result.label, a.number, tries, a.problem)
             return
+        steady = "" if a.steady_pct is None else f", steady within {a.steady_pct:.1f} %"
         msg = (
-            f"Calibration {result.label} (try {a.number} of {tries}): slope {a.slope_rate:.3f} vs "
-            f"Δmass {a.dmass_rate:.3f} mL/min ({a.diff_pct:.1f} % apart), R² {a.r2:.4f}"
+            f"Calibration {result.label} (try {a.number} of {tries}): {a.slope_rate:.3f} mL/min, "
+            f"R² {a.r2:.4f}{steady}; started {_signed(a.start_delay)} s, stopped {_signed(a.stop_delay)} s "
+            f"after the command (Δmass rate {a.dmass_rate:.3f})"
         )
         if a.passed:
             log.info(msg + " — passed.")
@@ -480,69 +585,65 @@ def estimate_seconds(settings, rates):
 
 def write_csv(path, results, settings, balance_name=""):
     """Write a summary row per attempt and return the path. Raw readings go to *_raw.csv."""
+
+    def num(v, fmt):
+        return "" if v is None else format(v, fmt)
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["# Jebao automatic calibration", time.strftime("%Y-%m-%d %H:%M:%S"), balance_name])
         w.writerow(["# settings"] + [f"{k}={v}" for k, v in settings.to_dict().items()])
-        w.writerow(
-            [
-                "head",
-                "pump_id",
-                "channel",
-                "try",
-                "on_time_s",
-                "start_g",
-                "end_g",
-                "delivered_mL",
-                "slope_rate_mL_min",
-                "dmass_rate_mL_min",
-                "diff_pct",
-                "r2",
-                "passed",
-                "old_rate_mL_min",
-                "result",
-                "note",
-            ]
-        )
+        header = [
+            "head",
+            "pump_id",
+            "channel",
+            "try",
+            "flow_rate_mL_min",
+            "r2",
+            "steady_pct",
+            "start_delay_s",
+            "stop_delay_s",
+            "on_time_s",
+            "start_g",
+            "end_g",
+            "delivered_mL",
+            "dmass_rate_mL_min",
+            "slope_vs_dmass_pct",
+            "fit_from_s",
+            "fit_to_s",
+            "passed",
+            "old_rate_mL_min",
+            "result",
+            "note",
+        ]
+        w.writerow(header)
         for r in results:
-            for a in r.attempts or [None]:
-                if a is None:
-                    w.writerow(
-                        [
-                            r.label,
-                            r.did,
-                            r.ch,
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            r.old_rate,
-                            r.status,
-                            r.note,
-                        ]
-                    )
-                    continue
+            if not r.attempts:
+                w.writerow(
+                    [r.label, r.did, r.ch] + [""] * (len(header) - 7) + ["", r.old_rate, r.status, r.note]
+                )
+                continue
+            for a in r.attempts:
                 w.writerow(
                     [
                         r.label,
                         r.did,
                         r.ch,
                         a.number,
+                        num(a.slope_rate, ".4f"),
+                        num(a.r2, ".5f"),
+                        num(a.steady_pct, ".2f"),
+                        num(a.start_delay, ".1f"),
+                        num(a.stop_delay, ".1f"),
                         f"{a.on_time:.2f}",
                         f"{a.start_g:.4f}",
                         f"{a.end_g:.4f}",
-                        "" if a.volume_ml is None else f"{a.volume_ml:.3f}",
-                        "" if a.slope_rate is None else f"{a.slope_rate:.4f}",
-                        "" if a.dmass_rate is None else f"{a.dmass_rate:.4f}",
-                        "" if a.diff_pct is None else f"{a.diff_pct:.2f}",
-                        "" if a.r2 is None else f"{a.r2:.5f}",
+                        num(a.volume_ml, ".3f"),
+                        num(a.dmass_rate, ".4f"),
+                        num(a.diff_pct, ".2f"),
+                        num(None if a.fit_t0 is None else a.fit_t0 - a.t_on, ".1f"),
+                        num(None if a.fit_t1 is None else a.fit_t1 - a.t_on, ".1f"),
                         a.passed,
                         r.old_rate,
                         r.status,
