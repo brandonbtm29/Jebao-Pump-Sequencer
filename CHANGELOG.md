@@ -4,6 +4,20 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-21
+
+### Changed
+- **Calibration results table:**
+  - Columns now get sensible widths, with units in the headers (Rate mL/min, Change vs old, R², Steady, Delays start / stop, Old mL/min).
+  - The Result column takes the spare room and shows why a head failed, or how late the pump started or stopped.
+  - Accept and Redo are small buttons instead of one stretched across the row.
+  - The new **Change vs old** column shows how far the new rate is from the one saved before.
+- On narrower windows the live chart sits above the results instead of beside them, so the table gets the full width.
+- The head being calibrated says what it is doing in the results table: settling, waiting for a still reading, turning the pump on, or running.
+
+### Fixed
+- While the cloud was still confirming ON, the live view said "Running · 0.00 mL" with an empty chart. It now says "Turning the pump on…".
+
 ## [2.3.0] - 2026-10-21
 
 ### Changed
@@ -148,7 +162,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...HEAD
+[2.3.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.0.1...v2.1.0
