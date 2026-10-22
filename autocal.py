@@ -314,7 +314,7 @@ class AutoCalibrator:
         self.results = []
         self.current = None  # HeadResult being worked on
         self.attempt = None  # its Attempt in progress
-        self.phase = ""  # "settling", "running", "settling after", ""
+        self.phase = ""  # "settling", "starting" (ON sent), "running", "settling after", ""
         self.phase_until = None  # when the current wait ends (None while running)
         self.started = None
         self.finished = False
@@ -460,7 +460,7 @@ class AutoCalibrator:
         if n == 0:
             raise RuntimeError("No balance readings. Check that it is connected and sending.")
         target_g = s.volume_ml * s.density
-        self.phase, self.phase_until = "running", None
+        self.phase, self.phase_until = "starting", None  # waiting for the cloud to confirm ON
         try:
             started = await self.set_head(result.did, result.ch, True)
         except BaseException:
@@ -471,6 +471,7 @@ class AutoCalibrator:
             await self._turn_off(result)
             raise RuntimeError(f"Couldn't start {result.label}. Check that the pump is online.")
         attempt.t_on = self.clock()
+        self.phase = "running"
         try:
             while True:
                 self._check()

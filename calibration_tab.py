@@ -17,6 +17,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QBoxLayout,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -170,10 +171,24 @@ class MassChart(QWidget):
             p.drawLine(xy(a, icpt + slope * a), xy(b, icpt + slope * b))
 
 
+class _RunArea(QWidget):
+    """Tells the tab its width so it can arrange the live view and the results."""
+
+    def __init__(self, on_width, parent=None):
+        super().__init__(parent)
+        self._on_width = on_width
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._on_width(event.size().width())
+
+
 # --- the tab ------------------------------------------------------------------------------
 
 
 class CalibrationTab(QWidget):
+    COL_RESULT, COL_ACTIONS = 7, 8
+
     def __init__(self, host, parent=None):
         super().__init__(parent)
         self.host = host
@@ -435,9 +450,10 @@ class CalibrationTab(QWidget):
         return page
 
     def _build_run_area(self):
-        area = QWidget()
-        lay = QHBoxLayout(area)
+        area = _RunArea(self._arrange_run_area)
+        lay = QBoxLayout(QBoxLayout.Direction.LeftToRight, area)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.run_layout = lay
 
         now = QGroupBox("Now calibrating")
         nv = QVBoxLayout(now)
@@ -474,36 +490,48 @@ class CalibrationTab(QWidget):
             self.stat_labels[key] = val
         nv.addLayout(stats)
         lay.addWidget(now, 1)
+        self.now_box = now
 
         res = QGroupBox("Results")
         rv = QVBoxLayout(res)
-        self.results_table = QTableWidget(0, 8)
-        self.results_table.setHorizontalHeaderLabels(
-            ["Head", "Rate", "R²", "Steady", "Delays", "Old", "Result", ""]
-        )
-        for col, tip in enumerate(
-            [
-                "",
-                "Flow rate in mL/min: the slope of the fitted line. This is what gets saved.",
-                "How well a straight line fits the readings.",
-                "How much the first and second half of the run differed.",
-                "How late the pump really started / stopped after the app sent ON / OFF "
-                "(cloud delays; shown, not counted against the head).",
-                "The rate saved before.",
-                "",
-            ]
-        ):
+        cols = [
+            ("Head", "", 150),
+            ("Rate\nmL/min", "Flow rate: the slope of the fitted line. This is what gets saved.", 78),
+            ("Change\nvs old", "How much the new rate differs from the one saved before.", 74),
+            ("R²", "How well a straight line fits the readings.", 70),
+            ("Steady", "How much the first and second half of the run differed.", 66),
+            (
+                "Delays (s)\nstart / stop",
+                "How late the pump really started / stopped after the app sent ON / OFF. "
+                "These are cloud delays: shown, not counted against the head.",
+                96,
+            ),
+            ("Old\nmL/min", "The rate saved before.", 74),
+            ("Result", "", 0),
+            ("", "", 150),
+        ]
+        self.results_table = QTableWidget(0, len(cols))
+        self.results_table.setHorizontalHeaderLabels([c[0] for c in cols])
+        hdr = self.results_table.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.setMinimumSectionSize(40)
+        for col, (_name, tip, width) in enumerate(cols):
             if tip:
                 self.results_table.horizontalHeaderItem(col).setToolTip(tip)
+            if col == self.COL_RESULT:
+                hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                self.results_table.setColumnWidth(col, width)
         self.results_table.verticalHeader().setVisible(False)
+        self.results_table.verticalHeader().setDefaultSectionSize(34)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setShowGrid(False)
         self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        hdr = self.results_table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.results_table.setColumnWidth(0, 130)
+        self.results_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.results_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.results_table.setMinimumHeight(200)
         rv.addWidget(self.results_table, 1)
         note = QLabel(
             "Rate = slope of the fitted line (mL/min), saved when R² and Steady pass. Delays = how "
@@ -531,6 +559,21 @@ class CalibrationTab(QWidget):
         lay.addWidget(res, 2)
         self._table_shown = None
         return area
+
+    WIDE_ENOUGH = 1150  # px: below this the live view goes above the results instead of beside
+
+    def _arrange_run_area(self, width):
+        """Side by side on wide windows; stacked on narrower ones so the table gets the width."""
+        if not hasattr(self, "run_area"):
+            return
+        stacked = width < self.WIDE_ENOUGH
+        want = QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
+        if self.run_layout.direction() != want:
+            self.run_layout.setDirection(want)
+            self.run_layout.setStretch(0, 0 if stacked else 1)
+            self.run_layout.setStretch(1, 1 if stacked else 2)
+            self.now_box.setMaximumHeight(380 if stacked else 16777215)
+            self.run_area.setMinimumHeight(820 if stacked else 520)
 
     @staticmethod
     def _cell(grid, row, col, label, widget):
@@ -946,8 +989,10 @@ class CalibrationTab(QWidget):
     def _phase_text(self, r):
         cal = self.cal
         if cal.phase == "settling":
-            left = max(0.0, (cal.phase_until or 0) - cal.clock())
-            return f"Settling · {left:.0f} s"
+            left = (cal.phase_until or 0) - cal.clock()
+            return f"Settling · {left:.0f} s" if left >= 0.5 else "Waiting for a still reading"
+        if cal.phase == "starting":
+            return "Turning the pump on…"
         if cal.phase == "running":
             return f"Running · {self._added():.2f} mL"
         if cal.phase == "settling after":
@@ -1013,7 +1058,12 @@ class CalibrationTab(QWidget):
         else:
             samples = a.samples
         if not a.t_on:
-            self.chart.set_data([], title="Settling: waiting for a steady reading…")
+            waiting = (
+                "Turning the pump on…"
+                if self.cal.phase == "starting"
+                else "Settling: waiting for a still reading…"
+            )
+            self.chart.set_data([], title=waiting)
             self._stats(a, None)
             return
         pts = [(t - a.t_on, g - a.start_g) for t, g, _st in samples]
@@ -1062,9 +1112,20 @@ class CalibrationTab(QWidget):
         shown = tuple(
             (r.key, r.status, len(r.attempts), r.rate, r.last and r.last.steady_pct, r.note) for r in rows
         )
-        if shown == self._table_shown:
-            return
-        self._table_shown = shown
+        if shown != self._table_shown:
+            self._table_shown = shown
+            self._rebuild_results(rows)
+        # the running head's line follows what it is doing, without rebuilding the table
+        for i, r in enumerate(rows):
+            if r.status == autocal.RUNNING:
+                item = self.results_table.item(i, self.COL_RESULT)
+                if item is not None:
+                    tries = 1 + cal.settings.retries
+                    n = len(r.attempts) or 1
+                    item.setText(f"{self._phase_text(r)} · try {n} of {tries}")
+
+    def _rebuild_results(self, rows):
+        cal = self.cal
         t = self.results_table
         t.setRowCount(len(rows))
         names = {
@@ -1072,61 +1133,81 @@ class CalibrationTab(QWidget):
             autocal.RUNNING: ("Running…", BLUE),
             autocal.SAVED: ("Saved", GREEN),
             autocal.ACCEPTED: ("Accepted by you", GREEN),
-            autocal.PASSED: ("Passed · not saved", AMBER),
+            autocal.PASSED: ("Passed · not saved yet", AMBER),
             autocal.FAILED: ("Failed", RED),
             autocal.STOPPED: ("Stopped", GREY),
         }
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        center = Qt.AlignmentFlag.AlignCenter
+        left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         for i, r in enumerate(rows):
             b = r.best
-            tries = f" ({len(r.attempts)} tries)" if len(r.attempts) > 1 else ""
             text, color = names.get(r.status, (r.status, GREY))
+            tries = f" after {len(r.attempts)} tries" if len(r.attempts) > 1 else ""
             if r.status == autocal.FAILED:
-                text = f"Failed{tries}"
-            tip = r.note or text
-            values = [
-                f"{self.host.get_device_name(r.did)} · CH{r.ch}",
-                fmt_rate(b.slope_rate) if b else "—",
-                "—" if not b or b.r2 is None else f"{b.r2:.4f}",
-                "—" if not b or b.steady_pct is None else f"{b.steady_pct:.1f} %",
-                "—"
-                if not b or b.start_delay is None
-                else f"{round(b.start_delay) + 0:+d} / {round(b.stop_delay) + 0:+d} s",
-                fmt_rate(r.old_rate),
-                text,
-            ]
-            for col, val in enumerate(values):
-                item = QTableWidgetItem(val)
-                if col == 0:
-                    item.setToolTip(r.label)
-                if col == 6:
-                    item.setForeground(QColor(color))
-                    item.setToolTip(tip)
-                if col == 3 and b and b.steady_pct is not None and b.steady_pct > cal.settings.tolerance_pct:
-                    item.setForeground(QColor(RED))
-                if col == 2 and b and b.r2 is not None and b.r2 < cal.settings.min_r2:
-                    item.setForeground(QColor(RED))
-                if col == 4 and b and b.delay_note:
-                    item.setForeground(QColor(AMBER))
-                    item.setToolTip(
-                        f"The pump {b.delay_note} (Δmass over the commanded time: "
+                text = f"Failed{tries}" + (f": {r.note}" if r.note else "")
+            elif r.status in (autocal.SAVED, autocal.ACCEPTED, autocal.PASSED):
+                if r.note:
+                    text += f" · {r.note}"
+                elif b and b.delay_note:
+                    text += f" · pump {b.delay_note}"
+            change = None
+            if b and b.slope_rate and r.old_rate:
+                change = (b.slope_rate - r.old_rate) / r.old_rate * 100.0
+            cells = [
+                (f"{self.host.get_device_name(r.did)} · CH{r.ch}", left, None, r.label),
+                (fmt_rate(b.slope_rate) if b else "—", right, None, None),
+                ("—" if change is None else f"{change:+.1f} %", right, None, None),
+                ("—" if not b or b.r2 is None else f"{b.r2:.4f}", right, None, None),
+                ("—" if not b or b.steady_pct is None else f"{b.steady_pct:.1f} %", right, None, None),
+                (
+                    "—"
+                    if not b or b.start_delay is None
+                    else f"{round(b.start_delay) + 0:+d} / {round(b.stop_delay) + 0:+d}",
+                    center,
+                    AMBER if b and b.delay_note else None,
+                    (
+                        f"The pump {b.delay_note} (rate over the commanded time: "
                         f"{fmt_rate(b.dmass_rate)} mL/min). Timed doses are off by about this much."
                     )
+                    if b and b.delay_note
+                    else None,
+                ),
+                (fmt_rate(r.old_rate), right, GREY, None),
+                (text, left, color, r.note or text),
+            ]
+            if b and b.steady_pct is not None and b.steady_pct > cal.settings.tolerance_pct:
+                cells[4] = (cells[4][0], right, RED, None)
+            if b and b.r2 is not None and b.r2 < cal.settings.min_r2:
+                cells[3] = (cells[3][0], right, RED, None)
+            for col, (val, align, fg, tip) in enumerate(cells):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(align)
+                if fg:
+                    item.setForeground(QColor(fg))
+                if tip:
+                    item.setToolTip(tip)
                 t.setItem(i, col, item)
-            t.setCellWidget(i, 7, self._actions(r))
+            t.setCellWidget(i, self.COL_ACTIONS, self._actions(r))
 
     def _actions(self, r):
         w = QWidget()
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(2, 0, 2, 0)
-        if r.status in (autocal.FAILED, autocal.PASSED, autocal.STOPPED, autocal.SAVED, autocal.ACCEPTED):
-            redo = QPushButton("Redo")
-            redo.clicked.connect(lambda _c=False, r=r: self.redo(r))
-            lay.addWidget(redo)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(6)
         if r.status in (autocal.FAILED, autocal.PASSED) and r.rate:
             acc = QPushButton("Accept" if r.status == autocal.FAILED else "Save")
-            acc.setToolTip(f"Save {r.rate:.3f} mL/min (the Δmass rate) for this head.")
+            acc.setToolTip(f"Save {r.rate:.3f} mL/min (the flow rate) for this head.")
             acc.clicked.connect(lambda _c=False, r=r: self.accept(r))
+            acc.setFixedWidth(64)
             lay.addWidget(acc)
+        if r.status in (autocal.FAILED, autocal.PASSED, autocal.STOPPED, autocal.SAVED, autocal.ACCEPTED):
+            redo = QPushButton("Redo")
+            redo.setToolTip("Calibrate this head again.")
+            redo.clicked.connect(lambda _c=False, r=r: self.redo(r))
+            redo.setFixedWidth(64)
+            lay.addWidget(redo)
+        lay.addStretch(1)
         return w
 
     def accept(self, r):

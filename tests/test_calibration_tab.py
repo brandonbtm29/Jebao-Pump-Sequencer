@@ -116,7 +116,7 @@ def test_a_full_run_saves_the_rates(rig, qt_loop):
     assert window.head_runs == {} and window._motor_jobs == 0 and not tab.running()
     tab.refresh()
     assert tab.results_table.rowCount() == 2
-    assert tab.results_table.item(0, 6).text() == "Saved"
+    assert tab.results_table.item(0, tab.COL_RESULT).text() == "Saved"
     assert "saved" in tile(tab, "A", 1).lbl_status.text()
     # a record of the run is kept in the data folder
     assert tab.csv_path and os.path.exists(tab.csv_path)
@@ -144,7 +144,7 @@ def test_failed_head_can_be_accepted_or_redone(rig, qt_loop, monkeypatch):
     assert result.status == autocal.FAILED
     assert window.config.get_pump("B")["calibration"][2] == 1.0  # not saved
     tab.refresh()
-    assert tab.results_table.item(0, 6).text().startswith("Failed")
+    assert tab.results_table.item(0, tab.COL_RESULT).text().startswith("Failed")
     tab.accept(result)
     assert result.status == autocal.ACCEPTED
     assert window.config.get_pump("B")["calibration"][2] == pytest.approx(result.rate, abs=1e-4)
