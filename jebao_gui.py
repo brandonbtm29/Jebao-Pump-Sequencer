@@ -26,11 +26,13 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import crash_log
 import eventlog
+import netwatch
 import rack
 import settings_location
 import shortcut
 import updater
 from calibration_tab import CalibrationTab
+from network_report import NetworkDialog
 from rack_widgets import ManualTab, RackTab
 
 APP_DIR = settings_location.app_folder(script_dir)
@@ -646,6 +648,10 @@ class SettingsDialog(QDialog):
             "How long the system log is kept on this computer. Older days are deleted when the app starts."
         )
         layout.addRow("Keep System Log For:", self.log_days_spin)
+        btn_network = QPushButton("Pump Connections…")
+        btn_network.setToolTip("When each pump dropped off Wi-Fi and came back, and router tips.")
+        btn_network.clicked.connect(lambda: getattr(parent, "open_network_report", lambda: None)())
+        layout.addRow("Wi-Fi:", btn_network)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -713,6 +719,13 @@ class JebaoPumpGUI(QMainWindow):
         self._motor_jobs = 0  # manual doses and calibration runs in progress
         self.head_runs = {}  # (did, ch) -> HeadRun for every head whose motor is running
         self.data_dir = DATA_DIR
+        # When each pump drops off Wi-Fi and comes back (see netwatch.py)
+        self.netlog = netwatch.ConnectionLog(
+            path=netwatch.history_path(eventlog.log_dir(DATA_DIR), eventlog.computer_name()),
+            keep_days=int(self.config.data.get("log_keep_days", eventlog.DEFAULT_KEEP_DAYS)),
+        ).load()
+        self._watching = False
+        self._relogging = False
 
         import asyncio
 
@@ -945,6 +958,12 @@ class JebaoPumpGUI(QMainWindow):
         self.version_button.clicked.connect(self.on_version_clicked)
         self.lbl_clock.setStyleSheet("color: grey; padding-left: 6px;")
         self.statusBar().addWidget(self.lbl_clock)
+        self.pumps_button = QPushButton("Pumps: —")
+        self.pumps_button.setFlat(True)
+        self.pumps_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pumps_button.setToolTip("How many pumps are on Wi-Fi. Click for the connection report.")
+        self.pumps_button.clicked.connect(self.open_network_report)
+        self.statusBar().addPermanentWidget(self.pumps_button)
         self.statusBar().addPermanentWidget(self.version_button)
 
     def show_update_state(self, result):
@@ -1244,22 +1263,105 @@ class JebaoPumpGUI(QMainWindow):
         finally:
             self.btn_refresh.setEnabled(True)
 
-    async def fetch_devices(self):
+    async def fetch_devices(self, quiet=False):
+        """Ask the cloud for the pump list (and which pumps are online). ``quiet`` is for the
+        regular background check: only changes are logged."""
         if not self.cloud_token:
             return
 
         url = f"https://{DOMAIN}/app/bindings"
         headers = {"X-Gizwits-Application-Id": APP_ID, "X-Gizwits-User-token": self.cloud_token}
+        started = time.monotonic()
         try:
             resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 200:
-                self.cloud_devices = resp.json().get("devices", [])
-                logger.info(f"Found {len(self.cloud_devices)} bound devices.")
-                self.refresh_pumps()
-            else:
-                logger.error(f"Failed to fetch devices: {resp.text}")
         except Exception as e:
-            logger.error(f"Fetch devices error: {e}")
+            self._cloud_check(False, f"no answer: {e.__class__.__name__}")
+            if not quiet:
+                logger.error(f"Fetch devices error: {e}")
+            return
+        took = time.monotonic() - started
+        if resp.status_code != 200:
+            if resp.status_code in (400, 401, 403) and "token" in resp.text.lower() and not self._relogging:
+                # The cloud session ran out (the app was open for days): log in again.
+                logger.info("The cloud session expired; logging in again.")
+                self._relogging = True
+                try:
+                    await self.login_and_fetch()
+                finally:
+                    self._relogging = False
+                return
+            self._cloud_check(False, f"error {resp.status_code}")
+            logger.error(f"Failed to fetch devices: {resp.text}")
+            return
+        self._cloud_check(True, None, took)
+        devices = resp.json().get("devices", [])
+        known = {d.get("did") for d in self.cloud_devices}
+        if not quiet or {d.get("did") for d in devices} != known:
+            self.cloud_devices = devices
+            if not quiet:
+                logger.info(f"Found {len(self.cloud_devices)} bound devices.")
+            self.refresh_pumps()
+        else:
+            # Same pumps: just update who is online, without rebuilding the tabs.
+            fresh = {d.get("did"): d for d in devices}
+            for d in self.cloud_devices:
+                d.update(fresh.get(d.get("did"), {}))
+        self._note_online_changes()
+        if not self._watching:
+            self._watching = True
+            self._start_task(self._watch_pumps)
+
+    def _cloud_check(self, ok, problem=None, seconds=None):
+        if self.netlog.cloud_check(ok, seconds, problem or ""):
+            if ok:
+                logger.info("Reached the Jebao cloud again.")
+            else:
+                logger.error(
+                    f"Can't reach the Jebao cloud from this computer ({problem}). Pump status is unknown "
+                    "until it answers again; check this computer's internet connection."
+                )
+        self._update_pump_count()
+
+    def _note_online_changes(self):
+        named = [dict(d, name=self.get_device_name(d.get("did"))) for d in self.cloud_devices]
+        for p, event, outage in self.netlog.update(named):
+            if event == "offline":
+                logger.warning(f"{p.name} went offline (lost its Wi-Fi or power).")
+            else:
+                logger.info(f"{p.name} is back online after {netwatch.fmt_duration(outage)}.")
+        self._update_pump_count()
+
+    async def _watch_pumps(self):
+        """Every POLL_S seconds, ask the cloud which pumps are online."""
+        while True:
+            await asyncio.sleep(netwatch.POLL_S)
+            if self.cloud_token and not self._relogging:
+                try:
+                    await self.fetch_devices(quiet=True)
+                except Exception as e:  # never let the watcher die
+                    logger.debug(f"Pump check failed: {e}")
+
+    def check_pumps_now(self):
+        self._start_task(lambda: self.fetch_devices(quiet=True))
+
+    def _update_pump_count(self):
+        btn = getattr(self, "pumps_button", None)
+        if btn is None:
+            return
+        total = len(self.cloud_devices)
+        online = sum(1 for d in self.cloud_devices if d.get("is_online", False))
+        if self.netlog.cloud_ok is False:
+            btn.setText("Pumps: cloud unreachable")
+            btn.setStyleSheet("color: #DC3545; font-weight: bold;")
+        elif not total:
+            btn.setText("Pumps: —")
+            btn.setStyleSheet("color: grey;")
+        else:
+            btn.setText(f"Pumps: {online}/{total} online")
+            btn.setStyleSheet("" if online == total else "color: #E67E22; font-weight: bold;")
+
+    def open_network_report(self):
+        NetworkDialog(self, self).exec()
 
     async def send_cloud_command(self, did, attrs):
         if not self.cloud_token:
