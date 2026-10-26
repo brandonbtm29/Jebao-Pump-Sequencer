@@ -4,6 +4,22 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-26
+
+### Added
+- **Pump Wi-Fi watch.** Every 30 s the app asks the Jebao cloud which pumps are online.
+  - The tiles update without pressing Refresh, and a **Pumps: 9/10 online** count sits in the bottom-right corner (orange when any are offline).
+  - Each drop and reconnection goes in the System Log, with how long the pump was gone.
+- **Connection report.** Click the count, or go to **Settings → Pump Connections**.
+  - For each pump: whether it's online and since when, drops in the last 24 h and 7 days, time offline, the longest outage, when it was last seen online, and its MAC address (for router address reservations).
+  - How quickly the cloud has been answering, and **Copy report** to paste the table elsewhere.
+  - Tips for travel-router settings.
+  - The history is kept on each computer in the log folder (`connection-<computer>.jsonl`), for as long as the System Log.
+- If this computer itself can't reach the cloud, the app says so once, and again when it's back, so a PC or internet problem isn't mistaken for the pumps dropping.
+
+### Changed
+- When the cloud session runs out (the app left open for days), the app logs in again by itself instead of failing the pump checks.
+
 ## [2.3.1] - 2026-10-21
 
 ### Changed
@@ -162,7 +178,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.1.0...v2.2.0
