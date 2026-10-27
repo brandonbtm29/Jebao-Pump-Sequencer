@@ -4,6 +4,32 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-27
+
+A pump head was left running overnight and burnt out its resistor. This release makes sure no head is left running, and that none runs too long.
+
+### Fixed
+- **Sequence steps ignored a failed OFF.** A Dose or Staccato step that couldn't turn its head off (Wi-Fi drop, cloud error) didn't retry or say anything, so the head kept running.
+- **A sequence stopped by an error left other channels running.** The other channels' doses were cut off without an OFF.
+- **A manual dose whose ON reply timed out was never turned off.** The app reported "couldn't start", but the pump had started.
+- **An OFF sent while a pump was off Wi-Fi was lost**, so the pump kept running after it reconnected.
+- **Emergency Stop didn't stop Async Dose/Staccato steps.** A staccato waiting between bursts started its next burst.
+- **Calibration gave up on a head that wouldn't stop** after three quick tries.
+- **The app stopped checking the cloud after a failed login** until Refresh was pressed. It now keeps trying in the background.
+
+### Added
+- **Pump guard.**
+  - **OFF until it works.** Every OFF is retried, with growing gaps, until it gets through.
+  - **Pump reports.** Every 30 s the app reads each pump's own report of its heads. An OFF only counts once the pump confirms it, and any head running that the app didn't start is turned off and logged (a lost OFF, a pump that reconnected, the phone app, or left over from before the app started, which is also checked at start-up).
+  - **Forgotten heads.** A head left on with nothing in the app running it is turned off.
+  - **Red bar.** While a head isn't confirmed off, a red bar names it, with an "I've switched it off" button. Closing or updating then asks first.
+- **On-time limit.**
+  - By default a head may run at most **30 min in any 60 min**. Change it in **Settings → Pump safety**, or give a head its own limit or none in the **Rack** tab.
+  - A dose or sequence step that reaches the limit turns the head off to rest, then carries on, so the full volume still goes in, just later. The tile shows "Resting · back in m:ss".
+  - Calibration skips a head without enough on-time left, and says when to redo it.
+- **ON that won't go through.** If a dose can't turn its head on after three tries, the step stops with an error instead of counting down as if it were pumping.
+- **Emergency Stop** also refuses any ON for 15 s, and cancels Async steps and manual doses.
+
 ## [2.4.0] - 2026-10-26
 
 ### Added
@@ -178,7 +204,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.2.0...v2.3.0

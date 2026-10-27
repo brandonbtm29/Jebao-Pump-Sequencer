@@ -19,6 +19,11 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **Channels run side by side**: each channel works through its own steps at the same time as the others. "Wait for All" lines them up again, and async doses run in the background.
 - **Queue**: line up several saved sequences and they run one after another.
 - **Review steps you can't miss**: when a sequence waits for your review, an orange bar appears across the top with an Approve button for each waiting channel.
+- **Pump guard: no head left running, none running too long**
+  - **OFF until it works.** Every OFF is retried until it gets through. An OFF to a pump that has dropped off Wi-Fi only counts once that pump reports the head off.
+  - **Checks what the pumps report.** Every 30 s the app reads each pump's own report of its four heads. A head running that the app didn't start (a lost OFF, a pump that reconnected, the phone app, or left over from before the app opened) is turned off and logged.
+  - **On-time limit.** Each head may run at most **30 min in any 60 min** by default (Settings → Pump safety). Each head can have its own limit or none (Rack tab). A dose that reaches the limit turns the head off to rest, then carries on, so the full volume still goes in, just later.
+  - **Red bar.** While a head isn't confirmed off, a red bar says so, and the app won't close or update without asking.
 - **Pump Wi-Fi watch**: every 30 s the app checks which pumps are online. The tiles and the "Pumps: 9/10 online" count in the bottom-right corner follow along, and each drop and reconnection goes in the System Log. Click the count (or **Settings → Pump Connections**) for a report: drops per pump in the last day and week, time offline, the longest outage, when each pump was last seen, its MAC address (for router address reservations), how quickly the cloud answers, and tips for the router's settings. The history is kept on each computer, in the log folder.
 - **Emergency stop**: one button cancels the running sequence and any manual doses, clears the queue and turns off all four channels on every pump.
 - **System log under every tab**: everything the app does is logged and saved on each computer for 30 days (adjustable in Settings). When you open the app, recent history is shown again above the new session. **Hide** shrinks it to one line showing the latest message.
@@ -93,7 +98,7 @@ The app keeps two settings files:
 | File | What's in it | Example |
 |---|---|---|
 | `secrets.json` | Your Jebao login | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit (`guard`) and per-head limits (`pumps.<id>.limits`), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 
