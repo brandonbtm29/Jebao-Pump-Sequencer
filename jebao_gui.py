@@ -27,6 +27,7 @@ if script_dir not in sys.path:
 import crash_log
 import eventlog
 import netwatch
+import pumpguard
 import rack
 import settings_location
 import shortcut
@@ -115,6 +116,7 @@ class HeadRun:
     paused: bool = False
     cancelled: bool = False
     resume: asyncio.Event = field(default_factory=asyncio.Event)
+    cooling_until: float | None = None  # resting after its on-time limit (time.time())
 
     @property
     def key(self):
@@ -653,6 +655,32 @@ class SettingsDialog(QDialog):
         btn_network.clicked.connect(lambda: getattr(parent, "open_network_report", lambda: None)())
         layout.addRow("Wi-Fi:", btn_network)
 
+        layout.addRow(QLabel("<b>Pump safety</b>"))
+        guard = self.config.data.get("guard", {})
+        self.chk_limit = QCheckBox("Limit how long each head can run")
+        self.chk_limit.setChecked(bool(guard.get("enabled", True)))
+        self.chk_limit.setToolTip(
+            "A dose that reaches the limit turns the head off to rest, then carries on when it "
+            "may (the full volume still goes in, just later). Each head can have its own limit "
+            "or none, in the Rack tab."
+        )
+        self.spin_limit_on = QSpinBox()
+        self.spin_limit_on.setRange(1, 600)
+        self.spin_limit_on.setSuffix(" min")
+        self.spin_limit_on.setValue(int(guard.get("on_min", 30)))
+        self.spin_limit_window = QSpinBox()
+        self.spin_limit_window.setRange(5, 1440)
+        self.spin_limit_window.setSuffix(" min")
+        self.spin_limit_window.setValue(int(guard.get("window_min", 60)))
+        limit_row = QHBoxLayout()
+        limit_row.addWidget(QLabel("At most"))
+        limit_row.addWidget(self.spin_limit_on)
+        limit_row.addWidget(QLabel("in any"))
+        limit_row.addWidget(self.spin_limit_window)
+        limit_row.addStretch(1)
+        layout.addRow(self.chk_limit)
+        layout.addRow("On-time limit:", limit_row)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -682,6 +710,11 @@ class SettingsDialog(QDialog):
         self.config.data["theme"] = self.theme_combo.currentText()
         self.config.data["text_size"] = self.size_combo.currentText()
         self.config.data["log_keep_days"] = self.log_days_spin.value()
+        self.config.data["guard"] = {
+            "enabled": self.chk_limit.isChecked(),
+            "on_min": min(self.spin_limit_on.value(), self.spin_limit_window.value()),
+            "window_min": self.spin_limit_window.value(),
+        }
         self.config.save()
         eventlog.prune(eventlog.log_dir(DATA_DIR), self.log_days_spin.value())
 
@@ -718,6 +751,7 @@ class JebaoPumpGUI(QMainWindow):
         self.current_running_sequence = None
         self._motor_jobs = 0  # manual doses and calibration runs in progress
         self.head_runs = {}  # (did, ch) -> HeadRun for every head whose motor is running
+        self._dose_tasks = set()  # manual doses in progress (Emergency Stop cancels them)
         self.data_dir = DATA_DIR
         # When each pump drops off Wi-Fi and comes back (see netwatch.py)
         self.netlog = netwatch.ConnectionLog(
@@ -726,6 +760,14 @@ class JebaoPumpGUI(QMainWindow):
         ).load()
         self._watching = False
         self._relogging = False
+        self.guard = pumpguard.PumpGuard(
+            send=lambda did, attrs: self._post_control(did, attrs),
+            read=lambda did: self._read_pump(did),
+            label=lambda did, ch: self.head_label(did, ch),
+            limit_for=lambda key: self.head_limit(key),
+        )
+        self.guard.on_stopped = self._guard_stopped
+        self.guard.on_over_limit = self._guard_over_limit
 
         import asyncio
 
@@ -810,6 +852,24 @@ class JebaoPumpGUI(QMainWindow):
         banner_layout.addWidget(self.btn_approve_all)
         self.approval_banner.setVisible(False)
         main_layout.addWidget(self.approval_banner)
+
+        # Red bar while the pump guard is still trying to turn a head off
+        self.guard_bar = QFrame()
+        self.guard_bar.setStyleSheet("QFrame { background-color: #7A1F1F; border-radius: 6px; }")
+        bar = QHBoxLayout(self.guard_bar)
+        bar.setContentsMargins(10, 6, 10, 6)
+        self.guard_banner = QLabel()
+        self.guard_banner.setWordWrap(True)
+        self.guard_banner.setStyleSheet("color: white; font-weight: bold; background: transparent;")
+        bar.addWidget(self.guard_banner, 1)
+        self.btn_guard_forget = QPushButton("I've switched it off")
+        self.btn_guard_forget.setToolTip(
+            "Stop checking these heads: only once you've switched the pump off or unplugged it yourself."
+        )
+        self.btn_guard_forget.clicked.connect(self.forget_guard_heads)
+        bar.addWidget(self.btn_guard_forget)
+        self.guard_bar.setVisible(False)
+        main_layout.addWidget(self.guard_bar)
 
         # --- Tabs: Manual | Sequencer | Calibration | Rack ---
         self.tabs = QTabWidget()
@@ -1035,6 +1095,11 @@ class JebaoPumpGUI(QMainWindow):
                 "A sequence is running or queued. Wait for it to finish, or press Emergency Stop, "
                 "before updating: restarting mid-dose can leave a pump running."
             )
+        if self.guard.pending():
+            return (
+                "The app is still trying to turn a pump head off (see the red bar). Wait until it "
+                "has, or switch that pump off by hand: closing now would stop it trying."
+            )
         if self._motor_jobs or self.head_runs:
             return (
                 "A dose or calibration run is in progress. Wait for it to finish, or press Emergency "
@@ -1068,6 +1133,29 @@ class JebaoPumpGUI(QMainWindow):
         cal = getattr(self, "calibration_tab", None)
         if cal is not None and cal.task is not None and not cal.task.done():
             await asyncio.wait({cal.task}, timeout=15)  # let it send its own OFF too
+        for i in range(40):  # up to 20 s for every OFF to go through and be confirmed
+            if not self.guard.pending(all_=True):
+                break
+            if i % 10 == 9 and self.cloud_token:
+                await self.fetch_devices(quiet=True)  # read the pumps' reports again now
+            await asyncio.sleep(0.5)
+        pending = self.guard.pending(all_=True)
+        if pending:
+            names = ", ".join(self.head_label(*k) for k in pending)
+            reply = QMessageBox.question(
+                self,
+                "Pump not confirmed off",
+                f"Couldn't confirm that these heads are off: {names}.\n\nIf the app closes, nothing "
+                "will keep trying to stop them. Close anyway (only if you've switched that pump off "
+                "by hand), or stay open and keep trying?",
+                QMessageBox.StandardButton.Close | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Close:
+                self._closing = False
+                return
+            logger.warning(f"Closed while these heads weren't confirmed off: {names}.")
+        self._closing = True
         self.close()
 
     def save_before_restart(self):
@@ -1241,6 +1329,9 @@ class JebaoPumpGUI(QMainWindow):
         self.btn_refresh.setEnabled(False)
         self.set_status_color(self.status_indicator, False)
         logger.info("Logging into Gizwits Cloud...")
+        if not self._watching:  # keeps trying even if this first login fails
+            self._watching = True
+            self._start_task(self._watch_pumps)
 
         url = f"https://{DOMAIN}/app/login"
         headers = {"X-Gizwits-Application-Id": APP_ID, "Content-Type": "application/json"}
@@ -1307,6 +1398,9 @@ class JebaoPumpGUI(QMainWindow):
             for d in self.cloud_devices:
                 d.update(fresh.get(d.get("did"), {}))
         self._note_online_changes()
+        running = {key: run.source for key, run in self.head_runs.items()}
+        await self.guard.check(self.cloud_devices, running)
+        self.refresh_guard_banner()
         if not self._watching:
             self._watching = True
             self._start_task(self._watch_pumps)
@@ -1333,13 +1427,26 @@ class JebaoPumpGUI(QMainWindow):
 
     async def _watch_pumps(self):
         """Every POLL_S seconds, ask the cloud which pumps are online."""
+        login_wait = 0
+        backoff = 60
         while True:
             await asyncio.sleep(netwatch.POLL_S)
-            if self.cloud_token and not self._relogging:
-                try:
+            if self._relogging:
+                continue
+            try:
+                if self.cloud_token:
+                    login_wait, backoff = 0, 60
                     await self.fetch_devices(quiet=True)
-                except Exception as e:  # never let the watcher die
-                    logger.debug(f"Pump check failed: {e}")
+                elif self.secrets.data.get("username") and self.secrets.data.get("password"):
+                    # Logged out (a failed login): keep trying, after 1, 2, 4 … up to 10 min,
+                    # since the guard needs the cloud to check and stop pumps.
+                    login_wait -= netwatch.POLL_S
+                    if login_wait <= 0:
+                        await self.login_and_fetch()
+                        if not self.cloud_token:
+                            login_wait, backoff = backoff, min(backoff * 2, 600)
+            except Exception as e:  # never let the watcher die
+                logger.debug(f"Pump check failed: {e}")
 
     def check_pumps_now(self):
         self._start_task(lambda: self.fetch_devices(quiet=True))
@@ -1364,6 +1471,11 @@ class JebaoPumpGUI(QMainWindow):
         NetworkDialog(self, self).exec()
 
     async def send_cloud_command(self, did, attrs):
+        """Send a command through the pump guard (see pumpguard.py), which keeps track of
+        what each head should be doing and makes sure OFFs get through."""
+        return await self.guard.command(did, attrs)
+
+    async def _post_control(self, did, attrs):
         if not self.cloud_token:
             logger.error("Not logged in.")
             return False
@@ -1387,6 +1499,87 @@ class JebaoPumpGUI(QMainWindow):
         except Exception as e:
             logger.error(f"Send command error: {e}")
             return False
+
+    async def _read_pump(self, did):
+        """The pump's own latest report ({"attr": {...}, "updated_at": ...}), or None."""
+        if not self.cloud_token:
+            return None
+        url = f"https://{DOMAIN}/app/devdata/{did}/latest"
+        headers = {"X-Gizwits-Application-Id": APP_ID, "X-Gizwits-User-token": self.cloud_token}
+        try:
+            resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=REQUEST_TIMEOUT)
+        except Exception:
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+    # --- Pump guard: no head left running, none running too long ---
+
+    def head_limit(self, key):
+        """The on-time limit for a head: the default from Settings, or its own (Rack tab)."""
+        g = self.config.data.get("guard", {})
+        default = pumpguard.Limit(
+            on_s=float(g.get("on_min", 30)) * 60,
+            window_s=float(g.get("window_min", 60)) * 60,
+            enabled=bool(g.get("enabled", True)),
+        )
+        did, ch = key
+        own = (self.config.data.get("pumps", {}).get(did, {}).get("limits") or [None] * 4)[ch - 1 : ch]
+        own = own[0] if own else None
+        if own == "off":
+            return pumpguard.Limit(default.on_s, default.window_s, enabled=False)
+        if isinstance(own, (int, float)) and own > 0:
+            return pumpguard.Limit(min(float(own) * 60, default.window_s), default.window_s, enabled=True)
+        return default
+
+    def _guard_stopped(self, key):
+        """A head the guard had to keep stopping is confirmed off."""
+        run = self.head_runs.get(key)
+        if run is not None and run.source == "calibration" and not self.calibration_running():
+            self._end_head_run(run)
+        self.refresh_guard_banner()
+
+    def _guard_over_limit(self, key):
+        run = self.head_runs.get(key)
+        if run is not None:
+            run.cancelled = True  # e.g. a calibration run: Cancel stops it
+            run.resume.set()
+
+    def refresh_guard_banner(self):
+        banner = getattr(self, "guard_banner", None)
+        if banner is None:
+            return
+        pending = self.guard.pending()
+        if not pending:
+            self.guard_bar.setVisible(False)
+            return
+        names = ", ".join(f"{self.head_label(*k)} ({why})" for k, why in pending.items())
+        banner.setText(
+            f"⚠ Making sure these heads are OFF, the app keeps retrying: {names}. "
+            "If a pump is offline, unplug it or switch it off by hand."
+        )
+        self.guard_bar.setVisible(True)
+
+    def forget_guard_heads(self):
+        pending = self.guard.pending(all_=True)
+        if not pending:
+            return
+        names = ", ".join(self.head_label(*k) for k in pending)
+        reply = QMessageBox.question(
+            self,
+            "Stop checking",
+            f"Have you switched these off yourself (or unplugged the pump)?\n\n{names}\n\n"
+            "The app will stop trying to turn them off. If one reconnects still running, it is "
+            "turned off then.",
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            for key in pending:
+                self.guard.forget(key, "you switched it off by hand")
+            self.refresh_guard_banner()
 
     # --- Pumps and the rack ---
     def rack_layout(self):
@@ -1445,6 +1638,7 @@ class JebaoPumpGUI(QMainWindow):
     def _refresh_visible_tab(self):
         """Tiles and panels follow the motor runs a few times a second (only the tab in view)."""
         self.calibration_tab._watch_cancel()
+        self.refresh_guard_banner()
         current = self.tabs.currentWidget()
         if current in (self.manual_tab, self.calibration_tab):
             current.refresh()
@@ -2008,7 +2202,13 @@ class JebaoPumpGUI(QMainWindow):
                     if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
                         raise asyncio.CancelledError(f"Channel {ch} dose cancelled while paused.")
                     logger.info(f"[{self.head_label(pump_did, ch)}] Resuming ({run.remaining:.1f} s left).")
-                    await self.send_cloud_command(pump_did, {channel_key: True})
+                    if self.guard.over_limit(run.key):
+                        continue  # rest first; it turns on again after
+                    await self._turn_on(pump_did, ch)
+
+                if self.guard.over_limit(run.key):
+                    await self._rest_head(run, by_channel)
+                    continue
 
                 chunk = min(0.1, run.remaining)
                 start_time = time.time()
@@ -2017,6 +2217,31 @@ class JebaoPumpGUI(QMainWindow):
         finally:
             self._end_head_run(run)
 
+    async def _rest_head(self, run, by_channel):
+        """The head used up its on-time budget: turn it off, wait, then carry on."""
+        did, ch = run.key
+        label = self.head_label(did, ch)
+        limit = self.head_limit(run.key)
+        await self.send_cloud_command(did, {f"channe{ch}": False})
+        run.cooling_until = self.guard.resume_at(run.key)
+        logger.warning(
+            f"[{label}] Reached its on-time limit ({limit.text()}). Resting until "
+            f"{datetime.fromtimestamp(run.cooling_until):%H:%M}, then the dose carries on "
+            f"({run.remaining / 60:.1f} min of pumping left)."
+        )
+        try:
+            while time.time() < run.cooling_until:
+                if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
+                    raise asyncio.CancelledError(f"Channel {ch} dose cancelled while resting.")
+                await asyncio.sleep(min(1.0, max(0.05, run.cooling_until - time.time())))
+                run.cooling_until = max(run.cooling_until, self.guard.resume_at(run.key))
+        finally:
+            run.cooling_until = None
+        if run.paused or (by_channel and self._ch_paused.get(ch, False)):
+            return  # paused while resting: it turns on again when resumed
+        logger.info(f"[{label}] Rested; carrying on ({run.remaining / 60:.1f} min of pumping left).")
+        await self._turn_on(did, ch)
+
     # --- Manual dispensing on several heads at once --------------------------------------
 
     def run_state(self, did, ch):
@@ -2024,6 +2249,8 @@ class JebaoPumpGUI(QMainWindow):
         run = self.head_runs.get((did, ch))
         if run is None:
             return None
+        if run.cooling_until is not None:
+            return ("cooling", run.progress, max(0.0, run.cooling_until - time.time()))
         paused = run.paused or (run.source == "sequence" and self._ch_paused.get(ch, False))
         return ("paused" if paused else "running", run.progress, max(0.0, run.remaining))
 
@@ -2065,6 +2292,8 @@ class JebaoPumpGUI(QMainWindow):
             )
             if task is not None:
                 tasks.append(task)
+                self._dose_tasks.add(task)
+                task.add_done_callback(self._dose_tasks.discard)
         return tasks
 
     async def _manual_pump_dispense(self, did, items, value, unit):
@@ -2072,9 +2301,13 @@ class JebaoPumpGUI(QMainWindow):
         self._motor_jobs += 1
         try:
             what = f"{value:g} mL" if unit == "volume" else f"{value:g} s"
-            ok = await self.send_cloud_command(did, {f"channe{ch}": True for ch, _ in items})
+            start_now = {f"channe{ch}": True for ch, _ in items if not self.guard.over_limit((did, ch))}
+            ok = await self.send_cloud_command(did, start_now) if start_now else True
             if not ok:
-                logger.error(f"Couldn't start {self.get_device_name(did)}; nothing was dispensed there.")
+                logger.error(
+                    f"Couldn't start {self.get_device_name(did)}; nothing was dispensed there "
+                    "(the app makes sure it is off, in case the command got through anyway)."
+                )
                 return
             for ch, seconds in items:
                 logger.info(f"Dispensing {what} on {self.head_label(did, ch)}: motor on for {seconds:.1f} s.")
@@ -2084,15 +2317,21 @@ class JebaoPumpGUI(QMainWindow):
 
     async def _manual_head(self, did, ch, seconds):
         label = self.head_label(did, ch)
+        outcome = "done"
         try:
             await self._interruptible_motor_run(ch, did, seconds, source="manual")
         except asyncio.CancelledError:
+            outcome = "cancelled"
             logger.warning(f"{label}: dispensing cancelled.")
-            return
-        if await self.send_cloud_command(did, {f"channe{ch}": False}):
+        except RuntimeError as e:  # couldn't turn it on again after a pause or a rest
+            outcome = "failed"
+            logger.error(f"{label}: {e}")
+        finally:
+            stopped = await self.send_cloud_command(did, {f"channe{ch}": False})
+        if not stopped:
+            logger.error(f"{label}: the STOP command failed; the app keeps retrying (see the red bar).")
+        elif outcome == "done":
             logger.info(f"{label}: done.")
-        else:
-            logger.error(f"{label}: the STOP command failed. Stop it by hand or with Emergency Stop.")
 
     def pause_heads(self, heads):
         for key in heads:
@@ -2136,10 +2375,7 @@ class JebaoPumpGUI(QMainWindow):
                 f"[Step {r + 1}] Dosing {val1}mL on {pump_name} CH{ch} (Running motor for {seconds:.1f}s)"
             )
 
-            channel_key = f"channe{ch}"
-            await self.send_cloud_command(pump_did, {channel_key: True})
-            await self._interruptible_motor_run(ch, pump_did, seconds)
-            await self.send_cloud_command(pump_did, {channel_key: False})
+            await self._timed_run(pump_did, ch, seconds)
 
         tasks = [run_channel(ch) for ch in channels]
         await asyncio.gather(*tasks)
@@ -2166,13 +2402,10 @@ class JebaoPumpGUI(QMainWindow):
             logger.info(
                 f"[Step {r + 1}] Staccato Dosing {total_vol}mL on {pump_name} CH{ch}. Burst: {burst_vol}mL ({burst_seconds:.1f}s), Wait: {wait_sec}s"
             )
-            channel_key = f"channe{ch}"
 
             for b in range(bursts_needed):
                 logger.info(f"  -> [Step {r + 1}] CH{ch} Burst {b + 1}/{bursts_needed}")
-                await self.send_cloud_command(pump_did, {channel_key: True})
-                await self._interruptible_motor_run(ch, pump_did, burst_seconds)
-                await self.send_cloud_command(pump_did, {channel_key: False})
+                await self._timed_run(pump_did, ch, burst_seconds)
                 if b < bursts_needed - 1 or remainder_vol > 0:
                     await self._interruptible_sleep_timer(ch, wait_sec)
 
@@ -2180,12 +2413,38 @@ class JebaoPumpGUI(QMainWindow):
                 logger.info(
                     f"  -> [Step {r + 1}] CH{ch} Final Burst: {remainder_vol:.1f}mL ({remainder_seconds:.1f}s)"
                 )
-                await self.send_cloud_command(pump_did, {channel_key: True})
-                await self._interruptible_motor_run(ch, pump_did, remainder_seconds)
-                await self.send_cloud_command(pump_did, {channel_key: False})
+                await self._timed_run(pump_did, ch, remainder_seconds)
 
         tasks = [run_channel(ch) for ch in channels]
         await asyncio.gather(*tasks)
+
+    async def _timed_run(self, did, ch, seconds, source="sequence"):
+        """ON, keep it on for ``seconds`` (pausing, cancelling and resting as needed), OFF.
+        The OFF is sent however the run ends, even if the step is cancelled or fails."""
+        channel_key = f"channe{ch}"
+        try:
+            if not self.guard.over_limit((did, ch)):  # over it: the run rests first, then turns on
+                await self._turn_on(did, ch)
+            await self._interruptible_motor_run(ch, did, seconds, source)
+        finally:
+            await self.send_cloud_command(did, {channel_key: False})
+
+    async def _turn_on(self, did, ch):
+        """Turn a head on for a dose, retrying a little. If it won't, the dose stops with an
+        error instead of counting down as if it were pumping."""
+        for wait in (0, 2, 5):
+            if wait:
+                await asyncio.sleep(wait)
+            if await self.send_cloud_command(did, {f"channe{ch}": True}):
+                return
+            if time.time() < self.guard.hold_until:
+                break  # Emergency Stop: don't keep trying
+        message = (
+            f"Couldn't turn {self.head_label(did, ch)} on (cloud or Wi-Fi problem), so this dose "
+            "was stopped rather than counted as delivered."
+        )
+        logger.error(message)  # also shown for Async steps, whose errors are otherwise collected quietly
+        raise RuntimeError(message)
 
     def emergency_stop_all(self):
         logger.info("!!! GLOBAL EMERGENCY STOP INITIATED !!!")
@@ -2194,8 +2453,16 @@ class JebaoPumpGUI(QMainWindow):
             self.sequence_queue.clear()
             self.refresh_queue_ui()
 
+        self.guard.hold(15)  # nothing may turn on for a moment, even a command already on its way
         if self.sequence_task and not self.sequence_task.done():
             self.sequence_task.cancel()
+        for tasks in getattr(self, "_ch_running_tasks", {}).values():  # Async Dose/Staccato steps
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        for task in list(self._dose_tasks):
+            if not task.done():
+                task.cancel()
         self.cancel_heads(list(self.head_runs))
         if hasattr(self, "calibration_tab"):
             self.calibration_tab.stop()

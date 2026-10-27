@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
 import rack
 
 MIME_DID = "application/x-jebao-pump"
+LIMIT_CHOICES = (5, 10, 15, 20, 25, 30, 40, 45, 50)  # per-head on-time limits offered (minutes)
 TILE_SIZES = {
     "S": {"height": 62, "name_px": 12, "small_px": 10},
     "M": {"height": 82, "name_px": 13, "small_px": 11},
@@ -50,6 +52,7 @@ TILE_SIZES = {
 COLORS = {
     "running": "#2FB36D",
     "paused": "#E0A33A",
+    "cooling": "#4FA3D1",
     "idle": "#6B7079",
     "offline": "#6B7079",
     "selected": "#4C8DFF",
@@ -147,7 +150,10 @@ class HeadTile(QPushButton):
         else:
             state, progress, left = run
             color = COLORS[state]
-            text = f"{'Running' if state == 'running' else 'Paused'} · {fmt_seconds(left)} left"
+            if state == "cooling":
+                text = f"Resting (on-time limit) · back in {fmt_seconds(left)}"
+            else:
+                text = f"{'Running' if state == 'running' else 'Paused'} · {fmt_seconds(left)} left"
         shown = (
             name,
             rate_text,
@@ -169,7 +175,7 @@ class HeadTile(QPushButton):
         self.bar.setValue(int((run[1] if run else 0) * 1000))
         self.bar.setStyleSheet(
             "QProgressBar { border: none; background: rgba(128,128,128,0.25); border-radius: 2px; }"
-            f"QProgressBar::chunk {{ background: {COLORS['paused'] if state == 'paused' else COLORS['running']}; }}"
+            f"QProgressBar::chunk {{ background: {COLORS.get(state, COLORS['running']) if state in ('paused', 'cooling') else COLORS['running']}; }}"
         )
         border = COLORS["selected"] if self.isChecked() else ("#8A8F98" if state != "offline" else "#55595F")
         width = 2 if self.isChecked() else 1
@@ -786,12 +792,25 @@ class RackTab(QWidget):
         self.edit_pump.editingFinished.connect(self._save_names)
         form.addRow("Pump name:", self.edit_pump)
         self.edit_heads = []
+        self.limit_combos = []
         for ch in range(1, 5):
             e = QLineEdit()
             e.setPlaceholderText("e.g. Water → Col 3")
             e.editingFinished.connect(self._save_names)
             form.addRow(f"CH{ch}:", e)
             self.edit_heads.append(e)
+            combo = QComboBox()
+            combo.addItem("Default on-time limit", None)
+            combo.addItem("No limit", "off")
+            for m in LIMIT_CHOICES:
+                combo.addItem(f"At most {m} min", m)
+            combo.setToolTip(
+                "How long this head may run in any window (the window and the default are in "
+                "Settings → Pump safety). A dose that reaches it rests, then carries on."
+            )
+            combo.currentIndexChanged.connect(lambda _i, ch=ch: self._save_limit(ch))
+            form.addRow("", combo)
+            self.limit_combos.append(combo)
         nl.addLayout(form)
         tip = QLabel(
             "Head names show on the Manual tiles and in the log. Leave a name empty to use the default."
@@ -918,8 +937,18 @@ class RackTab(QWidget):
     # --- names ---
 
     def _set_names_enabled(self, on):
-        for e in [self.edit_pump, *self.edit_heads]:
+        for e in [self.edit_pump, *self.edit_heads, *getattr(self, "limit_combos", [])]:
             e.setEnabled(on)
+
+    def _save_limit(self, ch):
+        did = self.current
+        if not did or getattr(self, "_loading", False):
+            return
+        pump = self.host.config.get_pump(did)
+        limits = (list(pump.get("limits") or []) + [None] * 4)[:4]
+        limits[ch - 1] = self.limit_combos[ch - 1].currentData()
+        pump["limits"] = limits
+        self.host.config.save()
 
     def _load_names(self):
         did = self.current
@@ -938,6 +967,14 @@ class RackTab(QWidget):
         self.edit_pump.setText(cfg.display_name(did))
         for ch, e in enumerate(self.edit_heads, start=1):
             e.setText(cfg.head_name(did, ch))
+        limits = (list(cfg.get_pump(did).get("limits") or []) + [None] * 4)[:4]
+        self._loading = True
+        try:
+            for combo, value in zip(self.limit_combos, limits, strict=True):
+                idx = combo.findData(value)
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+        finally:
+            self._loading = False
 
     def _save_names(self):
         did = self.current

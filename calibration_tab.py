@@ -963,8 +963,29 @@ class CalibrationTab(QWidget):
     # --- what the calibrator calls -------------------------------------------------------
 
     def _busy_elsewhere(self, did, ch):
+        """False if the head may be calibrated now, else why not (True or a message)."""
         run = self.host.head_runs.get((did, ch))
-        return run is not None and run.source != "calibration"
+        if run is not None and run.source != "calibration":
+            return True
+        guard = getattr(self.host, "guard", None)
+        if guard is None:
+            return False
+        s = self.cal.settings if self.cal else self.settings
+        rate = self.host.config.get_pump(did)["calibration"][ch - 1] or 1.0
+        need = max(s.min_run_s(), min(s.max_run_s, s.volume_ml / rate * 60.0))
+        limit = self.host.head_limit((did, ch)) if hasattr(self.host, "head_limit") else None
+        if limit is not None and limit.enabled and need > limit.on_s:
+            return (
+                f"A {need / 60:.0f} min run is longer than this head's on-time limit "
+                f"({limit.text()}). Lower Volume per head, or raise the head's limit in the Rack tab."
+            )
+        if guard.budget_left((did, ch)) < need:
+            when = datetime.fromtimestamp(guard.resume_at((did, ch), need))
+            return (
+                f"On-time limit: this head has run too much lately for a {need / 60:.0f} min run. "
+                f"Redo it after {when:%H:%M}."
+            )
+        return False
 
     async def _set_head(self, did, ch, on):
         host = self.host

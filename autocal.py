@@ -376,8 +376,14 @@ class AutoCalibrator:
                     self.paused = False
                     if self._stop:
                         break
-                if self.is_busy and self.is_busy(nxt.did, nxt.ch):
-                    nxt.status, nxt.note = FAILED, "Busy with a dose when its turn came. Redo it later."
+                busy = self.is_busy(nxt.did, nxt.ch) if self.is_busy else False
+                if busy:
+                    note = (
+                        busy
+                        if isinstance(busy, str)
+                        else "Busy with a dose when its turn came. Redo it later."
+                    )
+                    nxt.status, nxt.note = FAILED, note
                     log.warning("Calibration of %s skipped: %s", nxt.label, nxt.note)
                     continue
                 await self._calibrate(nxt)
