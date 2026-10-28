@@ -553,3 +553,291 @@ def test_system_log_can_be_hidden(window):
     window.set_log_collapsed(False)
     assert window.log_text.isVisible() and "Saved on this computer" in window.lbl_log_info.text()
     assert window.config.data["ui"]["log_collapsed"] is False
+
+
+# --- one copy at a time ---------------------------------------------------------------------
+
+
+def test_restart_releases_the_single_instance_lock_first(window, monkeypatch):
+    """The new copy must not find this one still holding the lock, or it would just quit."""
+    calls = []
+    monkeypatch.setattr(jebao_gui.single_instance, "release", lambda: calls.append("release"))
+    monkeypatch.setattr(jebao_gui.subprocess, "Popen", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(jebao_gui.QApplication, "quit", lambda: calls.append("quit"))
+    window.restart_app()
+    assert calls[0] == "release"
+    assert calls[1][0] == jebao_gui.sys.executable
+    assert calls[2] == "quit"
+
+
+def test_second_launch_brings_the_window_forward_under_qasync(qt_loop, monkeypatch):
+    """The running copy hears a second launch through a QLocalServer signal, delivered by the
+    same qasync loop the app runs on."""
+    import asyncio
+    import uuid
+
+    from PyQt6.QtNetwork import QLocalSocket
+
+    _, loop = qt_loop
+    monkeypatch.delenv(jebao_gui.single_instance.ENV_OFF, raising=False)
+    jebao_gui.single_instance.release()
+    guard = jebao_gui.single_instance.acquire(f"Jebao qasync test {uuid.uuid4().hex[:8]}")
+    try:
+        assert guard is not None and guard.active
+        shown = []
+        guard.bring_to_front = lambda: shown.append(True)
+        sock = QLocalSocket()
+        sock.connectToServer(guard.key)
+        assert sock.waitForConnected(2000)
+        sock.write(b"show\n")
+        sock.waitForBytesWritten(1000)
+
+        async def until_shown():
+            for _ in range(150):
+                if shown:
+                    return
+                await asyncio.sleep(0.02)
+
+        loop.run_until_complete(until_shown())
+        assert shown == [True]
+        sock.abort()
+    finally:
+        jebao_gui.single_instance.release()
+
+
+# --- Settings → App: Open Log Folder, Copy Diagnostics ---------------------------------------
+
+
+def test_app_box_has_log_folder_and_diagnostics_buttons(window):
+    dlg = jebao_gui.SettingsDialog(window.secrets, window.config, window)
+    texts = [b.text() for b in dlg.app_box.findChildren(jebao_gui.QPushButton)]
+    assert "Open Log Folder" in texts and "Copy Diagnostics" in texts
+    dlg.reject()
+
+
+def test_open_log_folder_opens_the_error_log_folder(window, monkeypatch):
+    opened = []
+    monkeypatch.setattr(jebao_gui.diagnostics, "open_folder", opened.append)
+    jebao_gui.AppBox(window).open_log_folder()
+    assert opened == [jebao_gui.os.path.dirname(jebao_gui.crash_log.log_path())]
+
+
+def test_open_log_folder_says_what_went_wrong(window, monkeypatch):
+    warnings = []
+
+    def fail(path):
+        raise OSError("There is no folder to open yet.")
+
+    monkeypatch.setattr(jebao_gui.diagnostics, "open_folder", fail)
+    monkeypatch.setattr(jebao_gui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    jebao_gui.AppBox(window).open_log_folder()
+    assert warnings and "There is no folder to open yet." in warnings[0]
+
+
+def test_copy_diagnostics_leaves_out_the_login_and_pump_ids(window, monkeypatch, tmp_path):
+    log = tmp_path / "logs" / "jebao_pump_sequencer.log"
+    log.parent.mkdir()
+    log.write_text(
+        "ERROR pumpguard: Command to AbcDid123Xyz987 failed: timed out\n"
+        "ERROR JebaoGUI: Send command error: HTTPSConnectionPool(host='usapi.gizwits.com', port=443): "
+        "Max retries exceeded with url: /app/control/OtherDid5555 (Caused by timeout)\n"
+        "WARNING pumpguard: a0b1c2d3e4f5 · CH1: making sure it is off (no reply).\n"
+        "INFO JebaoGUI: router says A0:B1:C2:D3:E4:F6\n"
+        "ERROR JebaoGUI: Login failed for lab.user@example.org with pw-pw-pw-pw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(jebao_gui.crash_log, "log_path", lambda: str(log))
+    monkeypatch.setitem(window.secrets.data, "username", "lab.user@example.org")
+    monkeypatch.setitem(window.secrets.data, "password", "pw-pw-pw-pw")
+    window.cloud_token = "tok-tok-tok-tok"  # noqa: S105 - made up for the test
+    window.cloud_devices = [
+        {"did": "AbcDid123Xyz987", "mac": "a0b1c2d3e4f5", "dev_alias": "JP 1", "is_online": True},
+        {"did": "SecondDid000111", "mac": "a0b1c2d3e4f7", "dev_alias": "JP 2", "is_online": False},
+    ]
+    box = jebao_gui.AppBox(window)
+    box.copy_diagnostics()
+    text = jebao_gui.QApplication.clipboard().text()
+    assert text.startswith(f"Jebao Pump Sequencer {jebao_gui.__version__}")
+    assert "Jebao cloud: logged in" in text
+    assert "Pumps on the account: 2 (1 online)" in text
+    assert "Balance: not connected" in text
+    assert "Settings folder:" in text and "Data folder:" in text
+    assert "Command to *** failed" in text  # the log is there, with the ID blanked
+    for private in (
+        "AbcDid123Xyz987",
+        "OtherDid5555",
+        "a0b1c2d3e4f5",
+        "A0:B1:C2:D3:E4:F6",
+        "lab.user@example.org",
+        "pw-pw-pw-pw",
+        "tok-tok-tok-tok",
+    ):
+        assert private not in text
+    assert box.lbl_diagnostics.text() == "Diagnostics copied. Paste them into a GitHub issue or an email."
+
+
+def test_diagnostics_name_the_connected_balance(window, qt_loop):
+    from balance import SimulatedBalance
+
+    window.calibration_tab.use_balance(SimulatedBalance(clock=time.monotonic))
+    try:
+        assert window.diagnostics_extra()["Balance"].startswith("connected (")
+        assert "SIM" in window.diagnostics_extra()["Balance"]
+    finally:
+        window.calibration_tab.use_balance(None)
+
+
+# --- update check when the app starts -------------------------------------------------------
+
+
+def test_update_check_at_start_only_changes_the_version_label(window, monkeypatch):
+    def no_dialog(*a, **k):
+        raise AssertionError("the check at start must not open a dialog")
+
+    for name in ("information", "warning", "question", "exec"):
+        monkeypatch.setattr(jebao_gui.QMessageBox, name, no_dialog)
+    monkeypatch.setattr(jebao_gui.updater, "latest_release", lambda version: _release("99.0.0"))
+    monkeypatch.setattr(window, "_run_in_background", lambda fn, done: done(fn(None)))
+    monkeypatch.setattr(window, "maintain_desktop_shortcut", lambda: None)
+    window.start_background_tasks()
+    assert "Update available: v99.0.0" in window.version_button.text()
+
+
+def test_update_check_at_start_can_be_turned_off(window, monkeypatch):
+    checks = []
+    monkeypatch.setattr(window, "_run_in_background", lambda fn, done: checks.append(fn))
+    monkeypatch.setattr(window, "maintain_desktop_shortcut", lambda: None)
+    box = jebao_gui.AppBox(window)
+    assert box.chk_check_on_start.isChecked()  # on unless turned off
+    window.start_background_tasks()
+    assert len(checks) == 1
+    try:
+        box.chk_check_on_start.setChecked(False)
+        with open(window.config.filepath, encoding="utf-8") as f:
+            assert json.load(f)["check_updates_on_start"] is False  # saved in jebao_config.json
+        window.start_background_tasks()
+        assert len(checks) == 1  # no check this time
+        assert not jebao_gui.AppBox(window).chk_check_on_start.isChecked()
+    finally:
+        window.config.data.pop("check_updates_on_start", None)
+        window.config.save()
+
+
+# --- window size, position and dividers, remembered on this computer -------------------------
+
+
+class _AnotherWindow:
+    """A second main window, as if the app had been closed and opened again."""
+
+    def __enter__(self):
+        self.handlers_before = list(jebao_gui.logger.handlers)
+        self.win = jebao_gui.JebaoPumpGUI()
+        return self.win
+
+    def __exit__(self, *exc):
+        for handler in jebao_gui.logger.handlers[:]:
+            if handler not in self.handlers_before:
+                jebao_gui.logger.removeHandler(handler)
+        self.win.guard.close()
+        self.win._closing = True
+        self.win.close()
+
+
+def _state_file():
+    return jebao_gui.os.path.join(jebao_gui.APP_DIR, jebao_gui.WINDOW_STATE_FILE)
+
+
+def test_window_opens_full_screen_the_first_time(window):
+    assert not jebao_gui.os.path.exists(_state_file())
+    assert window.isMaximized()
+
+
+def test_window_size_and_dividers_are_remembered(window):
+    app = jebao_gui.QApplication.instance()
+    window.showNormal()
+    window.tabs.setCurrentIndex(1)  # the Sequencer tab
+    app.processEvents()
+    window.main_splitter.setSizes([400, 300])
+    narrow = window.seq_splitter.sizes()[0]
+    window.seq_splitter.moveSplitter(narrow + 200, 1)  # as if dragged: a wider sequence list
+    app.processEvents()
+    log_split = window.main_splitter.sizes()
+    seq_split = window.seq_splitter.sizes()
+    assert seq_split[0] > narrow
+    window.close()  # saved on close
+    with open(_state_file(), encoding="utf-8") as f:
+        state = json.load(f)
+    assert state["geometry"] and state["log_splitter"] == log_split
+    assert state["sequencer_splitter"] == seq_split
+    assert not jebao_gui.os.path.exists(jebao_gui.os.path.join(jebao_gui.CONFIG_DIR, "window_state.json"))
+    with _AnotherWindow() as again:
+        assert not again.isVisible()  # main() shows it, with the size it had
+        again.show()
+        app.processEvents()
+        assert not again.isMaximized()  # it was a normal window last time
+        assert again.size() == window.size()
+        assert again.main_splitter.sizes() == log_split
+        again.tabs.setCurrentIndex(1)
+        app.processEvents()
+        assert again.seq_splitter.sizes() == seq_split
+    with _AnotherWindow() as third:  # the Sequencer tab not opened this time: its divider is kept
+        third.show()
+        app.processEvents()
+        third.close()
+        with open(_state_file(), encoding="utf-8") as f:
+            assert json.load(f)["sequencer_splitter"] == seq_split
+
+
+def test_maximized_window_opens_maximized_again(window):
+    jebao_gui.QApplication.processEvents()
+    window.remember_window_state()
+    with _AnotherWindow() as again:
+        again.show()
+        jebao_gui.QApplication.processEvents()
+        assert again.isMaximized()
+
+
+def test_window_off_screen_last_time_comes_back_on_screen(window):
+    app = jebao_gui.QApplication.instance()
+    window.showNormal()
+    window.move(6000, 5000)  # e.g. on a second monitor that is now unplugged
+    app.processEvents()
+    window.remember_window_state()
+    with _AnotherWindow() as again:
+        again.show()
+        app.processEvents()
+        assert again.geometry().intersects(app.primaryScreen().availableGeometry())
+
+
+def test_hidden_log_keeps_its_open_height_for_next_time(window):
+    app = jebao_gui.QApplication.instance()
+    app.processEvents()
+    window.main_splitter.setSizes([500, 220])
+    app.processEvents()
+    open_sizes = window.main_splitter.sizes()
+    try:
+        window.set_log_collapsed(True)
+        window.remember_window_state()
+        with open(_state_file(), encoding="utf-8") as f:
+            assert json.load(f)["log_splitter"] == open_sizes
+        with _AnotherWindow() as again:  # opens with the log hidden, as it was
+            assert again.log_collapsed and again._log_sizes == open_sizes
+    finally:
+        window.set_log_collapsed(False)
+
+
+def test_unreadable_window_state_is_ignored(window):
+    with open(_state_file(), "w", encoding="utf-8") as f:
+        f.write("{not json")
+    with _AnotherWindow() as again:
+        assert again.isMaximized()
+    with open(_state_file(), "w", encoding="utf-8") as f:
+        json.dump({"geometry": "zz", "log_splitter": [-1, "x"], "sequencer_splitter": [0, 0]}, f)
+    with _AnotherWindow() as again:
+        assert again.isMaximized()
+
+
+def test_window_state_file_is_gitignored():
+    gitignore = jebao_gui.os.path.join(jebao_gui.script_dir, ".gitignore")
+    with open(gitignore, encoding="utf-8") as f:
+        assert jebao_gui.WINDOW_STATE_FILE in f.read().split()
