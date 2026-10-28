@@ -29,6 +29,8 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **System log under every tab**: everything the app does is logged and saved on each computer for 30 days (adjustable in Settings). When you open the app, recent history is shown again above the new session. **Hide** shrinks it to one line showing the latest message.
 - **Shared settings**: keep your login, calibrations, layout, names and sequences in a synced folder so every computer uses the same ones.
 - **Version and updates**: the version is shown in the bottom-right corner. When a newer release is out it turns orange ("Update available"); click it to see what changed and update. It won't update while a sequence, dose or calibration is running.
+- **One copy at a time**: opening the app again brings the open window to the front, so two copies never drive the same pumps.
+- **Window layout**: on each computer the window opens where you left it, at the same size, with the dividers where you put them.
 - **Desktop shortcut**: the app puts an icon on your desktop the first time it starts and refreshes it after each update. On Windows it opens without a console window; on a Mac it's a small app you can drag to the Dock. You can turn this off in Settings.
 
 ![Calibration tab: heads picked on the rack, a live mass-against-time chart for the head being calibrated, the results table, and the balance and run settings](docs/screenshot-calibration.png)
@@ -47,7 +49,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 
 ## Install
 
-**Easiest:** double-click `Setup_Windows.bat` (Windows) or `Setup_Mac.command` (macOS) once. It creates the `.venv` folder and installs everything the app needs; run it again any time to repair or update the packages. The manual steps follow.
+**Easiest:** get the code (step 1), then double-click `Launch_Windows.bat` (Windows) or `Launch_Mac.command` (macOS). The first time, it creates the `.venv` folder and installs everything the app needs (a minute or two), then starts the app. If the app ever stops starting, double-click `Setup_Windows.bat` or `Setup_Mac.command` to repair or reinstall the packages. The manual steps follow.
 
 1. Get the code:
    ```
@@ -81,7 +83,7 @@ Coming from 1.x? Your login, calibrations, pump order and saved sequences carry 
 
 ## Updating
 
-Each time it starts, the app asks GitHub for the latest release (a normal web request; nothing about you or your pumps is sent). If a newer one is out, the version in the bottom-right corner turns orange. Click it, or open **Settings** and press **Check for Updates**, to read what changed and choose **Update and Restart**. The app:
+Each time it starts, the app asks GitHub for the latest release (a normal web request; nothing about you or your pumps is sent). To turn that off, untick **Check for updates when the app starts** in **Settings → App**. If a newer one is out, the version in the bottom-right corner turns orange; nothing pops up. Click it, or open **Settings** and press **Check for Updates**, to read what changed and choose **Update and Restart**. The app:
 
 - only moves to published releases, never to unfinished work;
 - refuses if you changed any of the app's own files, so nothing of yours is overwritten;
@@ -98,16 +100,23 @@ The app keeps two settings files:
 | File | What's in it | Example |
 |---|---|---|
 | `secrets.json` | Your Jebao login | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit (`guard`) and per-head limits (`pumps.<id>.limits`), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `jebao_config.json` | Theme, whether to check for updates at start (`check_updates_on_start`), the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit (`guard`) and per-head limits (`pumps.<id>.limits`), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 
 - **Where they live:** by default in the app folder. Both are listed in `.gitignore`, so they never get committed. **Settings → Settings Folder** can move them. A folder inside a synced drive (SyncThing, OneDrive…) shares them between computers. The choice is stored in `settings_location.json`, and the `UAKRON_SETTINGS_DIR` environment variable overrides it.
+- **Window size and position** are kept per computer in `window_state.json` in the app folder (also gitignored). It never moves to the settings folder, because each computer has its own screens.
 - **Data folder:** the app runs inside `~/SyncThing/UAkron Playground/Jebao Pump`. Set `UAKRON_APP_DATA_DIR` to use a different folder; the app creates it if it is missing. Its `logs/` folder holds two kinds of log:
   - the **system log** you see in the window, one file per day per computer (`events-YYYY-MM-DD-<computer>.log`), kept for 30 days by default. **Open Log Folder** in the log box opens it.
-  - the **error log**, `jebao_pump_sequencer.log`, with tracebacks of errors. An unexpected error is shown in a dialog instead of closing the app.
+  - the **error log**, `jebao_pump_sequencer.log`, with tracebacks of errors. An unexpected error is shown in a dialog instead of closing the app. **Settings → App → Open Log Folder** opens this folder too.
 
   Its `calibrations/` folder keeps a CSV of every automatic calibration (`autocal-<date-time>.csv`, one row per try) and the raw balance readings next to it (`…_raw.csv`).
+
+## Troubleshooting
+
+- **The app doesn't start:** double-click the launcher again. If its window shows an error, double-click `Setup_Windows.bat` or `Setup_Mac.command` to repair the install, then try again.
+- **Nothing seems to happen when you open it:** it's probably open already, minimized or on another desktop. Only one copy runs at a time; opening it again brings the open window to the front.
+- **Reporting a problem:** press **Settings → App → Copy Diagnostics** and paste the text into a GitHub issue or an email. It has the version, this computer's setup and the end of the error log, without your login, pump IDs or MAC addresses.
 
 ## How it works
 
@@ -141,7 +150,7 @@ The tests run headless (`QT_QPA_PLATFORM=offscreen` is set for you) and never to
 
 The version number lives in one place, `__version__` in `jebao_gui.py`. To make a release, bump it, move the "Unreleased" notes in `CHANGELOG.md` under the new version, then tag `vX.Y.Z` and create a GitHub release from those notes.
 
-`settings_location.py` is shared, unchanged, by several of my lab apps, so ruff leaves it alone.
+`settings_location.py` is shared, unchanged, by several of my lab apps, so ruff leaves it alone. `crash_log.py`, `diagnostics.py` and `single_instance.py` are shared the same way: change them in every app at once, or not at all.
 
 The icon in `assets/` is drawn by `scripts/make_icon.py` (needs `pip install pillow`); run it again after changing the design.
 
