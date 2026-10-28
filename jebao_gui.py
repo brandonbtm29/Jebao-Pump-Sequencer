@@ -25,12 +25,14 @@ os.chdir(DATA_DIR)
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import crash_log
+import diagnostics
 import eventlog
 import netwatch
 import pumpguard
 import rack
 import settings_location
 import shortcut
+import single_instance
 import updater
 from calibration_tab import CalibrationTab
 from network_report import NetworkDialog
@@ -39,9 +41,13 @@ from rack_widgets import ManualTab, RackTab
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
 SETTINGS_FILES = ["jebao_config.json", "secrets.json"]
+APP_NAME = "Jebao Pump Sequencer"  # also names the single-instance lock
+# Window size, position and dividers: per computer, in the app folder (gitignored), never synced
+WINDOW_STATE_FILE = "window_state.json"
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -50,7 +56,7 @@ from datetime import datetime
 
 import qasync
 import requests
-from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QByteArray, QEvent, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -383,8 +389,75 @@ class _Task(QThread):
             self.done.emit(e)
 
 
+# --- Copy Diagnostics ------------------------------------------------------------------------
+
+_MAC_ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b|\b[0-9A-Fa-f]{12}\b")
+_PUMP_URL = re.compile(r"(/app/(?:control|devdata)/)[^/\s'\")]+")
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def scrub_private(text, private=()):
+    """Blank what diagnostics.redact() can't know about: the Jebao login, the cloud token, pump
+    IDs (also inside cloud URLs), MAC addresses and e-mail addresses."""
+    for value in sorted({str(v) for v in private if v and len(str(v)) >= 4}, key=len, reverse=True):
+        text = text.replace(value, "***")
+    text = _PUMP_URL.sub(r"\1***", text)
+    text = _MAC_ADDRESS.sub("***", text)
+    return _EMAIL.sub("***", text)
+
+
+def diagnostics_text(window=None):
+    """The text Settings → App → Copy Diagnostics puts on the clipboard."""
+    extra = window.diagnostics_extra() if hasattr(window, "diagnostics_extra") else {}
+    private = window.private_values() if hasattr(window, "private_values") else []
+    text = diagnostics.report(
+        APP_NAME,
+        __version__,
+        APP_DIR,
+        settings_dir=CONFIG_DIR,
+        data_dir=DATA_DIR,
+        log_path=crash_log.log_path(),
+        extra=extra,
+    )
+    return scrub_private(text, private)
+
+
+def check_updates_on_start(config):
+    """The "Check for updates when the app starts" setting in jebao_config.json (on by default)."""
+    return True if config is None else bool(config.data.get("check_updates_on_start", True))
+
+
+# --- window size and position, kept per computer ---------------------------------------------
+
+
+def load_window_state(app_dir):
+    """The saved window layout for this computer ({} if none or unreadable)."""
+    try:
+        with open(os.path.join(app_dir, WINDOW_STATE_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_window_state(app_dir, state):
+    """Write the window layout safely: a crash mid-write leaves the old file, not half a file."""
+    path = os.path.join(app_dir, WINDOW_STATE_FILE)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _sizes(value, count):
+    """Splitter sizes from the state file, or None if they don't look right."""
+    if isinstance(value, list) and len(value) == count and all(isinstance(v, int) and v >= 0 for v in value):
+        return value if sum(value) > 0 else None
+    return None
+
+
 class AppBox(QGroupBox):
-    """The "App" box in Settings: version, Check for Updates, and Create Desktop Shortcut."""
+    """The "App" box in Settings: version, Check for Updates, diagnostics, and Create Desktop Shortcut."""
 
     def __init__(self, main_window=None, parent=None):
         super().__init__("App", parent)
@@ -395,8 +468,16 @@ class AppBox(QGroupBox):
         self._cancel = None
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"You are running Jebao Pump Sequencer <b>{__version__}</b>."))
+        self.chk_check_on_start = QCheckBox("Check for updates when the app starts")
+        self.chk_check_on_start.setToolTip(
+            "Asks GitHub for the latest release when the app opens. If there is a newer one, the "
+            "version in the bottom-right corner turns orange. Nothing pops up."
+        )
+        self.chk_check_on_start.setChecked(check_updates_on_start(getattr(main_window, "config", None)))
+        self.chk_check_on_start.toggled.connect(self._check_on_start_toggled)
+        lay.addWidget(self.chk_check_on_start)
         self.lbl_status = QLabel(
-            "The app checks GitHub for a newer release each time it starts, or now with this button."
+            "Check for Updates asks GitHub for the latest release. Nothing about you or your pumps is sent."
         )
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -413,6 +494,26 @@ class AppBox(QGroupBox):
         btn_restart.clicked.connect(self._restart)
         row.addWidget(btn_restart)
         lay.addLayout(row)
+
+        # For bug reports
+        diag_row = QHBoxLayout()
+        self.btn_log_folder = QPushButton("Open Log Folder")
+        self.btn_log_folder.setToolTip("Show the folder with the error log and the system log.")
+        self.btn_log_folder.clicked.connect(self.open_log_folder)
+        diag_row.addWidget(self.btn_log_folder)
+        self.btn_diagnostics = QPushButton("Copy Diagnostics")
+        self.btn_diagnostics.setToolTip(
+            "Copy the version, this computer's setup and the end of the error log, for a bug report."
+        )
+        self.btn_diagnostics.clicked.connect(self.copy_diagnostics)
+        diag_row.addWidget(self.btn_diagnostics)
+        diag_row.addStretch(1)
+        lay.addLayout(diag_row)
+        self.lbl_diagnostics = QLabel(
+            "Copy Diagnostics copies details for a bug report. Your login, pump IDs and MAC addresses are left out."
+        )
+        self.lbl_diagnostics.setWordWrap(True)
+        lay.addWidget(self.lbl_diagnostics)
 
         where = {
             "win32": "a shortcut on your desktop that opens the app without a console window",
@@ -434,6 +535,24 @@ class AppBox(QGroupBox):
         self.chk_auto_shortcut.setChecked(shortcut.load_state(APP_DIR).get("auto", True))
         self.chk_auto_shortcut.toggled.connect(self._auto_shortcut_toggled)
         lay.addWidget(self.chk_auto_shortcut)
+
+    def _check_on_start_toggled(self, on):
+        config = getattr(self.main_window, "config", None)
+        if config is not None:
+            config.data["check_updates_on_start"] = bool(on)
+            config.save()
+
+    # --- for bug reports -------------------------------------------------------------------
+
+    def open_log_folder(self):
+        try:
+            diagnostics.open_folder(diagnostics.log_folder(crash_log.log_path()))
+        except OSError as e:
+            QMessageBox.warning(self, "Open Log Folder", f"Couldn't open the log folder.\n\n{e}")
+
+    def copy_diagnostics(self):
+        QApplication.clipboard().setText(diagnostics_text(self.main_window))
+        self.lbl_diagnostics.setText("Diagnostics copied. Paste them into a GitHub issue or an email.")
 
     def _auto_shortcut_toggled(self, on):
         state = shortcut.load_state(APP_DIR)
@@ -739,7 +858,18 @@ class JebaoPumpGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Jebao Multi-Pump SPE Sequencer (Cloud Edition)")
         self.setMinimumSize(1100, 800)
-        self.showMaximized()
+        # Size and position from last time on this computer (Qt keeps it on a screen that is
+        # still there); the first time, full screen as before.
+        self._window_state = load_window_state(APP_DIR)
+        geometry = self._window_state.get("geometry")
+        restored = False
+        if isinstance(geometry, str):
+            try:
+                restored = self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
+            except (UnicodeEncodeError, ValueError):
+                restored = False
+        if not restored:
+            self.showMaximized()
 
         self.config = ConfigManager()
         self.secrets = SecretsManager()
@@ -783,6 +913,7 @@ class JebaoPumpGUI(QMainWindow):
 
         self.setup_ui()
         self._build_status_bar()
+        self._restore_splitters()
 
         logger.info("Jebao SPE GUI Initialized (Cloud Mode).")
 
@@ -995,6 +1126,44 @@ class JebaoPumpGUI(QMainWindow):
         os.makedirs(folder, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
+    # --- window layout, remembered per computer (window_state.json in the app folder) ---------
+
+    def _restore_splitters(self):
+        """Put the dividers (tabs | System Log, and the Sequencer's sidebar) back where they were."""
+        log_split = _sizes(self._window_state.get("log_splitter"), 2)
+        if log_split:
+            if self.log_collapsed:
+                self._log_sizes = log_split  # used when the log is shown again
+            else:
+                self.main_splitter.setSizes(log_split)
+        seq_split = _sizes(self._window_state.get("sequencer_splitter"), 2)
+        if seq_split:
+            self.seq_splitter.setSizes(seq_split)  # applied when the Sequencer tab is first shown
+        # Until the Sequencer tab has been opened its divider reports made-up sizes, so only a
+        # divider moved this time is saved; otherwise the one from last time is kept.
+        self._seq_split_moved = False
+        self.seq_splitter.splitterMoved.connect(self._seq_splitter_moved)
+
+    def _seq_splitter_moved(self, _pos, _index):
+        self._seq_split_moved = True
+
+    def remember_window_state(self):
+        """Save the window's size, position and dividers for next time, on this computer only."""
+        state = {"geometry": self.saveGeometry().toHex().data().decode("ascii")}
+        log_split = _sizes(self._log_sizes if self.log_collapsed else self.main_splitter.sizes(), 2)
+        if log_split:
+            state["log_splitter"] = list(log_split)
+        if self._seq_split_moved:
+            seq_split = _sizes(self.seq_splitter.sizes(), 2)
+        else:
+            seq_split = _sizes(self._window_state.get("sequencer_splitter"), 2)
+        if seq_split:
+            state["sequencer_splitter"] = seq_split
+        try:
+            save_window_state(APP_DIR, state)
+        except OSError as e:
+            logger.warning(f"Couldn't save the window size and position: {e}")
+
     def update_clock(self):
         now = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
         self.lbl_clock.setText(now)
@@ -1060,8 +1229,10 @@ class JebaoPumpGUI(QMainWindow):
         return task
 
     def start_background_tasks(self):
-        """Run once after the window opens: check for a newer release and keep the desktop shortcut current."""
-        self._run_in_background(lambda _say: updater.latest_release(__version__), self.show_update_state)
+        """Run once after the window opens: check for a newer release (unless turned off in
+        Settings → App; it only changes the version label) and keep the desktop shortcut current."""
+        if check_updates_on_start(self.config):
+            self._run_in_background(lambda _say: updater.latest_release(__version__), self.show_update_state)
         self.maintain_desktop_shortcut()
 
     # --- desktop shortcut kept up to date -----------------------------------------------------
@@ -1113,6 +1284,7 @@ class JebaoPumpGUI(QMainWindow):
         if not busy or getattr(self, "_closing", False):
             if hasattr(self, "calibration_tab") and self.calibration_tab.bal is not None:
                 self.calibration_tab.bal.close()
+            self.remember_window_state()
             event.accept()
             return
         event.ignore()
@@ -1168,8 +1340,40 @@ class JebaoPumpGUI(QMainWindow):
         logger.info("Restarting application...")
         if hasattr(self, "seq_table"):
             self.auto_save_sequence()
+        self.remember_window_state()
+        single_instance.release()  # or the new copy would find this one running and quit
         subprocess.Popen([sys.executable] + sys.argv)  # noqa: S603 (restarts this same app)
         QApplication.quit()
+
+    # --- Copy Diagnostics (Settings → App) ----------------------------------------------------
+
+    def diagnostics_extra(self):
+        """A few lines about the pumps and balance for a bug report: counts only, no IDs."""
+        total = len(self.cloud_devices)
+        online = sum(1 for d in self.cloud_devices if d.get("is_online", False))
+        extra = {
+            "Jebao cloud": "logged in" if self.cloud_token else "not logged in",
+            "Pumps on the account": f"{total} ({online} online)" if total else "none listed",
+            "Pumps in the settings": len(self.config.data.get("pumps") or {}),
+        }
+        cal = getattr(self, "calibration_tab", None)
+        bal = getattr(cal, "bal", None)
+        if bal is None:
+            extra["Balance"] = "not connected"
+        else:
+            extra["Balance"] = f"connected ({cal._bal_name()})" + (f", {bal.error}" if bal.error else "")
+        return extra
+
+    def private_values(self):
+        """What Copy Diagnostics must never show: the Jebao login, the cloud token, pump IDs and MACs."""
+        values = [self.secrets.data.get("username"), self.secrets.data.get("password"), self.cloud_token]
+        for d in self.cloud_devices:
+            values += [d.get("did"), d.get("mac"), d.get("passcode"), d.get("product_key")]
+        values += list(self.config.data.get("pumps") or {})
+        for stack in (self.config.data.get("rack") or {}).get("stacks") or []:
+            if isinstance(stack, dict):
+                values += [s for s in stack.get("slots") or [] if isinstance(s, str)]
+        return [str(v) for v in values if v]
 
     def approve_channel(self, ch):
         if self._ch_review_events.get(ch):
@@ -1241,6 +1445,7 @@ class JebaoPumpGUI(QMainWindow):
         page.addWidget(seq_sidebar)
         page.addWidget(self.build_sequencer_tab())
         page.setSizes([260, 900])
+        self.seq_splitter = page
         return page
 
     def build_sequencer_tab(self):
@@ -2643,6 +2848,12 @@ def set_app_icon(app):
 
 def main():
     app = QApplication(sys.argv)
+    # Only one copy at a time: two would send the same pumps conflicting commands. Opening the
+    # app again brings the running copy's window forward instead (a QLocalServer signal, which
+    # the qasync loop delivers like any other Qt event).
+    instance_guard = single_instance.acquire(APP_NAME)
+    if instance_guard is None:
+        sys.exit(0)
     set_app_icon(app)
 
     # Load config to apply theme early
@@ -2660,6 +2871,8 @@ def main():
     logger.addHandler(eventlog.DailyFileHandler(folder))
 
     window = JebaoPumpGUI(history=history)
+    instance_guard.set_window(window)
+    window.instance_guard = instance_guard  # held for the app's lifetime
     window.show()
     QTimer.singleShot(1500, window.start_background_tasks)
 

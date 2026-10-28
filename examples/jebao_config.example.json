@@ -2,6 +2,7 @@
     "_comment": "Optional. The app creates jebao_config.json itself; this shows its shape. Keys under 'pumps' are Gizwits device ids (did) from your account.",
     "theme": "Dark",
     "text_size": "Medium",
+    "check_updates_on_start": true,
     "pump_order": ["EXAMPLEDID0000000001"],
     "pumps": {
         "EXAMPLEDID0000000001": {

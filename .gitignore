@@ -6,6 +6,9 @@ jebao_config.json
 settings_location.json
 # Per-copy record of the desktop shortcut the app made
 desktop_shortcut.json
+# Per-computer window size, position and dividers
+window_state.json
+window_state.json.tmp
 crash_log.txt
 
 # --- Python ---

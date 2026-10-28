@@ -1,6 +1,8 @@
 @echo off
-rem One-click setup for Jebao Pump Sequencer: creates this folder's own Python environment (.venv)
-rem and installs everything the app needs. Run it again any time to repair or update it.
+rem Repair or reinstall Jebao Pump Sequencer. You don't need this to start: Launch_Windows.bat sets
+rem the app up by itself the first time. Run this if the app stops starting (missing or broken
+rem packages): it creates this folder's own Python environment (.venv) if needed and reinstalls
+rem everything the app needs.
 cd /d "%~dp0"
 echo Setting up Jebao Pump Sequencer in %CD%
 echo.

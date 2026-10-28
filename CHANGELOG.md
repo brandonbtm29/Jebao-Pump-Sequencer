@@ -4,6 +4,15 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+- **One copy at a time.** Opening the app while it's already running brings the open window to the front instead of starting a second copy, so two copies can never send the same pumps different commands. Restart App and Update and Restart work as before.
+- **Open Log Folder** and **Copy Diagnostics** in **Settings → App**. Copy Diagnostics copies the version, this computer's setup, the number of pumps, whether a balance is connected and the end of the error log, ready to paste into a GitHub issue or an email. Your Jebao login, pump IDs and MAC addresses are left out.
+- **Check for updates when the app starts**: a checkbox in **Settings → App**, on by default. Untick it to skip the check at start-up; **Check for Updates** still works.
+- **The window remembers its size and position** on each computer, and where you left the dividers above the System Log and beside the Sequencer's list. The first time, it opens full screen as before.
+
+### Changed
+- **One file to double-click.** The first time, `Launch_Windows.bat` / `Launch_Mac.command` set the app up themselves (they create the `.venv` folder and install what the app needs, which takes a minute or two), then start it. `Setup_Windows.bat` / `Setup_Mac.command` are now only for repairing or reinstalling.
+
 ## [2.5.0] - 2026-10-27
 
 A pump head was left running overnight and burnt out its resistor. This release makes sure no head is left running, and that none runs too long.
