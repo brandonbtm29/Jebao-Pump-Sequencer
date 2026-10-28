@@ -755,6 +755,9 @@ def test_window_opens_full_screen_the_first_time(window):
 def test_window_size_and_dividers_are_remembered(window):
     app = jebao_gui.QApplication.instance()
     window.showNormal()
+    # Wider than the minimum size: at 1100 px both Sequencer panes are at their minimum width
+    # on Windows (bigger fonts), so the divider can't be dragged at all.
+    window.resize(1400, 900)
     window.tabs.setCurrentIndex(1)  # the Sequencer tab
     app.processEvents()
     window.main_splitter.setSizes([400, 300])
