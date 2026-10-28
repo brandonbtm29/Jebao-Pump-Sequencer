@@ -1,6 +1,8 @@
 #!/bin/bash
-# One-click setup for Jebao Pump Sequencer on macOS: creates this folder's own Python environment
-# (.venv) and installs everything the app needs. Run it again any time to repair or update it.
+# Repair or reinstall Jebao Pump Sequencer on macOS. You don't need this to start: Launch_Mac.command
+# sets the app up by itself the first time. Run this if the app stops starting (missing or broken
+# packages): it creates this folder's own Python environment (.venv) if needed and reinstalls
+# everything the app needs.
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 fail() { echo; echo "$1"; read -r -p "Press Enter to close"; exit 1; }
 new_enough() { "$1" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; }
