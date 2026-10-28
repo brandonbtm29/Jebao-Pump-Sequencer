@@ -4,6 +4,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-28
+
 ### Added
 - **One copy at a time.** Opening the app while it's already running brings the open window to the front instead of starting a second copy, so two copies can never send the same pumps different commands. Restart App and Update and Restart work as before.
 - **Open Log Folder** and **Copy Diagnostics** in **Settings → App**. Copy Diagnostics copies the version, this computer's setup, the number of pumps, whether a balance is connected and the end of the error log, ready to paste into a GitHub issue or an email. Your Jebao login, pump IDs and MAC addresses are left out.
@@ -213,7 +215,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.0...v2.3.1
