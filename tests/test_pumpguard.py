@@ -414,6 +414,7 @@ def test_cancelled_on_is_stopped_and_stopped_again_later(monkeypatch):
     cloud = Cloud()
     g = cloud.guard()
     monkeypatch.setattr(pumpguard, "FOLLOW_UP_S", 5)
+    monkeypatch.setattr(pumpguard, "FINISH_WAIT_S", 0.05)  # the request never comes back
 
     async def go():
         async def hang(did, attrs):
@@ -622,3 +623,65 @@ def test_offs_waiting_for_a_report_are_trusted_if_reports_cant_be_read():
         assert g.pending(all_=True) == {}
 
     run(go())
+
+
+def test_cancelled_on_waits_for_its_request_then_the_head_is_turned_off():
+    # Skip or Stop just after a dose starts, while its ON is still on its way. The OFF must
+    # not overtake that ON, or the head would stay on when the ON lands after it.
+    cloud = Cloud()
+    g = cloud.guard()
+    landed = []
+
+    async def go():
+        async def slow(did, attrs):
+            if attrs.get("channe2"):
+                await asyncio.sleep(0.2)
+                landed.append("ON")
+            return await cloud.send(did, attrs)
+
+        g.send = slow
+        task = asyncio.ensure_future(g.command("A", {"channe2": True}))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        off = asyncio.ensure_future(g.command("A", {"channe2": False}))  # the dose's own OFF
+        task.cancel()  # cancelled twice: still waits
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert landed == ["ON"]
+        await off
+        await asyncio.gather(*g._retrying.values())
+
+    run(go())
+    assert cloud.sent[0] == ("A", {"channe2": True}) and cloud.sent[-1] == ("A", {"channe2": False})
+    assert g.pending() == {} and g.app_on[("A", 2)] is False
+
+
+def test_off_cancelled_before_it_went_out_is_still_sent():
+    cloud = Cloud()
+    g = cloud.guard()
+
+    async def go():
+        await g.command("A", {"channe1": True})
+        async with g._lock(("A", 1)):  # something else is sending to that head
+            off = asyncio.ensure_future(g.command("A", {"channe1": False}))
+            await asyncio.sleep(0)
+            off.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await off
+        await asyncio.gather(*g._retrying.values())
+
+    run(go())
+    assert cloud.sent[-1] == ("A", {"channe1": False}) and g.pending() == {}
+
+
+def test_re_on_is_skipped_if_the_dose_ended_meanwhile():
+    cloud = Cloud()
+    g = cloud.guard()
+
+    async def go():
+        await g.command("A", {"channe1": True})
+        await g.command("A", {"channe1": False})
+        assert not await g.command("A", {"channe1": True}, only_if=lambda: bool(g.app_on.get(("A", 1))))
+
+    run(go())
+    assert [a for _d, a in cloud.sent] == [{"channe1": True}, {"channe1": False}]

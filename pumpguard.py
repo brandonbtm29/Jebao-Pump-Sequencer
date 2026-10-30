@@ -35,6 +35,7 @@ CHECK_S = 30  # how often the pumps' own reports are read (with the online check
 ORPHAN_GRACE_S = 20  # an ON with nothing running it is left alone this long
 REPORT_GRACE_S = 120  # a pump report older than our last command is ignored this long
 FOLLOW_UP_S = 12  # after a cancelled or failed ON, OFF is sent again this much later
+FINISH_WAIT_S = 15  # a cancelled command waits this long for its request to finish (the timeout is 10 s)
 CONFIRM_GRACE_S = 45  # an OFF not yet confirmed by the pump's report shows as pending after this
 CLOCK_SLACK_S = 60  # the cloud's report times and this PC's clock may differ by this much
 KEEP_HISTORY_S = 25 * 3600  # on-time history kept (the longest window in Settings is 24 h)
@@ -52,6 +53,12 @@ class Limit:
         if not self.enabled:
             return "no limit"
         return f"{self.on_s / 60:g} min in any {self.window_s / 60:g} min"
+
+
+def resting_need(limit):
+    """How much on-time a resting head waits for before it runs again: a sixth of the
+    limit, at least a minute, so it doesn't flick on and off."""
+    return min(limit.on_s, max(60.0, limit.on_s / 6))
 
 
 class OnTimeBudget:
@@ -147,37 +154,86 @@ class PumpGuard:
         """Refuse every ON for a while (Emergency Stop)."""
         self.hold_until = max(self.hold_until, self.clock() + seconds)
 
-    async def command(self, did, attrs):
+    async def command(self, did, attrs, only_if=None):
         """Send ``attrs`` (e.g. {"channe2": True}) and keep track of what it means.
 
         Commands to the same head never overlap (one lock per head), so an OFF can't
-        overtake an ON or the other way round."""
+        overtake an ON or the other way round. ``only_if()`` is asked once the lock is held:
+        False skips the command (it was no longer wanted).
+
+        Cancelled while its request is on its way, a command waits for the request to
+        finish (up to ``FINISH_WAIT_S``) before passing the cancel on, so what the app knows
+        matches what the pump got, and a later OFF can't overtake it. A cancelled ON then
+        always ends with the head made OFF (whoever cancelled it didn't want it running),
+        and an OFF cancelled before it went out is still sent, until it works.
+        """
         heads = [(int(m.group(1)), bool(v)) for k, v in attrs.items() if (m := _CH.match(k))]
         keys = sorted({(did, ch) for ch, _on in heads})
-        async with contextlib.AsyncExitStack() as stack:
-            for key in keys:
-                await stack.enter_async_context(self._lock(key))
-            if any(on for _ch, on in heads) and self.clock() < self.hold_until:
-                log.warning(f"{did}: ON refused right after Emergency Stop.")
-                return False
-            now = self.clock()
-            for ch, on in heads:
-                self.last_cmd[(did, ch)] = now
-                self._in_flight[(did, ch)] = on
-            try:
-                ok = await self.send(did, attrs)
-            except asyncio.CancelledError:
-                # Cancelled while waiting for the cloud: the command may still go through.
-                self._after(did, heads, False)
-                raise
-            except Exception as e:  # noqa: BLE001 - treat like a failed command
-                log.error(f"Command to {did} failed: {e}")
-                ok = False
-            finally:
+        sent = False
+        try:
+            async with contextlib.AsyncExitStack() as stack:
                 for key in keys:
-                    self._in_flight.pop(key, None)
-            self._after(did, heads, ok)
-        return ok
+                    await stack.enter_async_context(self._lock(key))
+                if only_if is not None and not only_if():
+                    return False
+                if any(on for _ch, on in heads) and self.clock() < self.hold_until:
+                    log.warning(f"{did}: ON refused right after Emergency Stop.")
+                    return False
+                now = self.clock()
+                for ch, on in heads:
+                    self.last_cmd[(did, ch)] = now
+                    self._in_flight[(did, ch)] = on
+                sent = True
+                request = asyncio.ensure_future(self._send(did, attrs))
+                try:
+                    ok = await asyncio.shield(request)
+                except asyncio.CancelledError:
+                    ok = await self._finish(request)
+                    if ok is None:  # still not back: it may yet go through
+                        self._after(did, heads, False)
+                    else:
+                        self._after(did, heads, ok)
+                        for ch, on in heads:
+                            if on:
+                                self.stop(did, ch, "its ON was cancelled", quiet=True)
+                    raise
+                finally:
+                    for key in keys:
+                        self._in_flight.pop(key, None)
+                self._after(did, heads, ok)
+            return ok
+        except asyncio.CancelledError:
+            if not sent:
+                for ch, on in heads:
+                    if not on:
+                        self.stop(did, ch, "an OFF was cancelled before it went out")
+            raise
+
+    async def _send(self, did, attrs):
+        try:
+            return bool(await self.send(did, attrs))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - treat like a failed command
+            log.error(f"Command to {did} failed: {e}")
+            return False
+
+    async def _finish(self, request):
+        """Wait for a request whose sender was cancelled: its result, or None if it is
+        still not back after FINISH_WAIT_S. Further cancels don't cut the wait short."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FINISH_WAIT_S
+        while not request.done():
+            left = deadline - loop.time()
+            if left <= 0:
+                return None
+            try:
+                await asyncio.wait({request}, timeout=left)
+            except asyncio.CancelledError:
+                continue
+        if request.cancelled():
+            return None
+        return request.result()
 
     def _after(self, did, heads, ok):
         now = self.clock()
@@ -246,8 +302,10 @@ class PumpGuard:
         warned = False
         while True:
             async with self._lock(key):
-                if key not in self.must_off:  # turned on on purpose meanwhile
-                    return
+                if key not in self.must_off:
+                    if self.app_on.get(key) is False:
+                        break  # an OFF got through another way: still do the follow-up below
+                    return  # turned on on purpose meanwhile
                 try:
                     ok = await self.send(did, {f"channe{ch}": False})
                 except Exception:  # noqa: BLE001
@@ -302,7 +360,7 @@ class PumpGuard:
         limit = self.limit_for(key)
         if not limit.enabled:
             return self.clock()
-        need = need if need is not None else min(limit.on_s, max(60.0, limit.on_s / 6))
+        need = need if need is not None else resting_need(limit)
         return self.budget.resume_at(key, self.clock(), limit, need)
 
     def budget_left(self, key):
@@ -391,7 +449,15 @@ class PumpGuard:
                         # The app has it on for a dose, but the pump says it is off.
                         self._reported[key] = "off"
                         log.warning(f"{self.label(*key)} reports OFF during its dose; sending ON again.")
-                        task = asyncio.ensure_future(self.command(did, {f"channe{key[1]}": True}))
+                        task = asyncio.ensure_future(
+                            self.command(
+                                did,
+                                {f"channe{key[1]}": True},
+                                only_if=lambda key=key: bool(
+                                    self.app_on.get(key)
+                                ),  # not if it ended meanwhile
+                            )
+                        )
                         self._tasks.add(task)
                         task.add_done_callback(self._tasks.discard)
                     continue
