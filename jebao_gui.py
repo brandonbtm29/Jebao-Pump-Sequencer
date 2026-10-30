@@ -30,6 +30,7 @@ import eventlog
 import netwatch
 import pumpguard
 import rack
+import sequence
 import settings_location
 import shortcut
 import single_instance
@@ -37,6 +38,7 @@ import updater
 from calibration_tab import CalibrationTab
 from network_report import NetworkDialog
 from rack_widgets import ManualTab, RackTab
+from sequencer_tab import SequencerTab
 
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
@@ -45,6 +47,8 @@ APP_NAME = "Jebao Pump Sequencer"  # also names the single-instance lock
 # Window size, position and dividers: per computer, in the app folder (gitignored), never synced
 WINDOW_STATE_FILE = "window_state.json"
 import asyncio
+import contextlib
+import html
 import json
 import logging
 import re
@@ -56,26 +60,20 @@ from datetime import datetime
 
 import qasync
 import requests
-from PyQt6.QtCore import QByteArray, QEvent, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import QByteArray, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -83,8 +81,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
-    QStackedWidget,
-    QTableWidget,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -204,70 +200,6 @@ class SecretsManager:
                 json.dump(self.data, f, indent=4)
         except Exception as e:
             logger.error(f"Failed to save secrets: {e}")
-
-
-class CheckableComboBox(QComboBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setModel(QStandardItemModel(self))
-        self.model().dataChanged.connect(self.updateText)
-        self.view().setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-
-        # Add a dummy item that acts as the display text for the combobox
-        self._display_item = QStandardItem("1")
-        self.model().appendRow(self._display_item)
-        self.view().setRowHidden(0, True)
-
-        self.view().viewport().installEventFilter(self)
-
-    def eventFilter(self, obj, event):
-        if obj == self.view().viewport():
-            if event.type() == QEvent.Type.MouseButtonRelease:
-                index = self.view().indexAt(event.pos())
-                if index.isValid() and index.row() > 0:
-                    item = self.model().itemFromIndex(index)
-                    if item.checkState() == Qt.CheckState.Checked:
-                        item.setCheckState(Qt.CheckState.Unchecked)
-                    else:
-                        item.setCheckState(Qt.CheckState.Checked)
-                return True
-        return super().eventFilter(obj, event)
-
-    def addItem(self, text, userData=None):
-        item = QStandardItem(text)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-        item.setData(userData, Qt.ItemDataRole.UserRole)
-        self.model().appendRow(item)
-
-    def addItems(self, texts):
-        for text in texts:
-            self.addItem(text)
-
-    def checkedItems(self):
-        checked = []
-        for i in range(1, self.model().rowCount()):
-            item = self.model().item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                checked.append(item.text())
-        return checked
-
-    def setCheckedItems(self, items):
-        for i in range(1, self.model().rowCount()):
-            item = self.model().item(i)
-            if item.text() in items:
-                item.setCheckState(Qt.CheckState.Checked)
-            else:
-                item.setCheckState(Qt.CheckState.Unchecked)
-        self.updateText()
-
-    def updateText(self):
-        checked = self.checkedItems()
-        if checked:
-            self._display_item.setText(",".join(checked))
-        else:
-            self._display_item.setText("None")
-        self.setCurrentIndex(0)
 
 
 class ConfigManager:
@@ -877,12 +809,27 @@ class JebaoPumpGUI(QMainWindow):
         self.cloud_token = None
         self.cloud_devices = []
 
-        self.sequence_queue = []
+        self.sequence_queue = []  # [{"name", "data": steps}], run one after another
         self.current_running_sequence = None
+        self.sequence_task = None
+        self.queue_paused = False  # the next queued run waits until this is False
+        self.seq_run = None  # sequence.RunState of the running (or last) run
+        self._stop_reason = ""
+        self._run_problem = None
+        self._lane_tasks = {}
+        self._ch_running_tasks = {1: [], 2: [], 3: [], 4: []}  # background steps per lane
+        self._ch_step_tasks = {}  # lane -> the step it is on (Skip cancels it)
+        self._ch_current = {}  # lane -> sequence.Flat it is on
+        self._skip = {}
+        self._sync_points = {}
+        self._ch_review_titles = {}  # lane -> what the waiting step is, for the banner
+        self._run_one = False  # start the next queued run even though the queue is paused
+        self._told_calibration = False
         self._motor_jobs = 0  # manual doses and calibration runs in progress
         self.head_runs = {}  # (did, ch) -> HeadRun for every head whose motor is running
         self._dose_tasks = set()  # manual doses in progress (Emergency Stop cancels them)
         self.data_dir = DATA_DIR
+        self.run_history_path = sequence.history_path(eventlog.log_dir(DATA_DIR), eventlog.computer_name())
         # When each pump drops off Wi-Fi and comes back (see netwatch.py)
         self.netlog = netwatch.ConnectionLog(
             path=netwatch.history_path(eventlog.log_dir(DATA_DIR), eventlog.computer_name()),
@@ -969,14 +916,14 @@ class JebaoPumpGUI(QMainWindow):
         banner_layout.addWidget(self.lbl_approval, 1)
         self.btn_approve_channels = []
         for i in range(4):
-            btn = QPushButton(f"Approve CH{i + 1}")
+            btn = QPushButton(f"Continue CH{i + 1}")
             btn.setEnabled(False)
             btn.setVisible(False)
             btn.setStyleSheet(APPROVE_STYLE)
             btn.clicked.connect(lambda checked, ch=i + 1: self.approve_channel(ch))
             self.btn_approve_channels.append(btn)
             banner_layout.addWidget(btn)
-        self.btn_approve_all = QPushButton("Approve All")
+        self.btn_approve_all = QPushButton("Continue all")
         self.btn_approve_all.setEnabled(False)
         self.btn_approve_all.setStyleSheet(APPROVE_ALL_STYLE)
         self.btn_approve_all.clicked.connect(self.approve_all)
@@ -1006,7 +953,9 @@ class JebaoPumpGUI(QMainWindow):
         self.tabs = QTabWidget()
         self.manual_tab = ManualTab(self)
         self.tabs.addTab(self.manual_tab, "Manual")
-        self.tabs.addTab(self.build_sequencer_page(), "Sequencer")
+        self.sequencer_tab = SequencerTab(self)
+        self.seq_splitter = self.sequencer_tab.splitter  # its sidebar divider is remembered
+        self.tabs.addTab(self.sequencer_tab, "Sequencer")
         self.calibration_tab = CalibrationTab(self)
         self.tabs.addTab(self.calibration_tab, "Calibration")
         self.rack_tab = RackTab(self)
@@ -1069,8 +1018,6 @@ class JebaoPumpGUI(QMainWindow):
         gui_handler = GUILogHandler(self.log_text)
         gui_handler.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(gui_handler)
-
-        self.refresh_saved_sequences_ui()
 
         # Tiles and the dispense panel follow the motor runs a few times a second
         self.ui_timer = QTimer(self)
@@ -1271,6 +1218,8 @@ class JebaoPumpGUI(QMainWindow):
                 "The app is still trying to turn a pump head off (see the red bar). Wait until it "
                 "has, or switch that pump off by hand: closing now would stop it trying."
             )
+        if self.guard._in_flight:
+            return "A pump command is on its way. Try again in a few seconds."
         if self._motor_jobs or self.head_runs:
             return (
                 "A dose or calibration run is in progress. Wait for it to finish, or press Emergency "
@@ -1330,16 +1279,20 @@ class JebaoPumpGUI(QMainWindow):
         self._closing = True
         self.close()
 
+    def auto_save_sequence(self):
+        """Save the Sequencer tab's sequence being edited (it is also saved as you edit)."""
+        tab = getattr(self, "sequencer_tab", None)
+        if tab is not None:
+            tab.save_draft()
+
     def save_before_restart(self):
-        if hasattr(self, "seq_table"):
-            self.auto_save_sequence()
+        self.auto_save_sequence()
         self.config.save()
         self.secrets.save()
 
     def restart_app(self):
         logger.info("Restarting application...")
-        if hasattr(self, "seq_table"):
-            self.auto_save_sequence()
+        self.auto_save_sequence()
         self.remember_window_state()
         single_instance.release()  # or the new copy would find this one running and quit
         subprocess.Popen([sys.executable] + sys.argv)  # noqa: S603 (restarts this same app)
@@ -1397,131 +1350,24 @@ class JebaoPumpGUI(QMainWindow):
         if waiting:
             chans = ", ".join(f"CH{ch}" for ch in waiting)
             seq = self.current_running_sequence
-            where = f" in “{seq}”" if seq else ""
+            where = f" in “{html.escape(seq)}”" if seq else ""
+            titles = [self._ch_review_titles.get(ch) for ch in waiting]
+            if titles and all(titles) and len(set(titles)) == 1:
+                what = f" ({html.escape(titles[0])})"
+            elif any(titles):
+                what = (
+                    " ("
+                    + "; ".join(
+                        f"CH{ch}: {html.escape(t)}" for ch, t in zip(waiting, titles, strict=True) if t
+                    )
+                    + ")"
+                )
+            else:
+                what = ""
             self.lbl_approval.setText(
-                f"<b>Waiting for your review:</b> {chans}{where}. Check it, then approve to continue."
+                f"<b>Waiting for you:</b> {chans}{where}{what}. Check, then press Continue."
             )
         self.approval_banner.setVisible(bool(waiting))
-
-    def build_sequencer_page(self):
-        """The Sequencer tab: saved sequences and the queue on the left, the step table on the right."""
-        page = QSplitter(Qt.Orientation.Horizontal)
-        seq_sidebar = QWidget()
-        seq_sidebar_layout = QVBoxLayout(seq_sidebar)
-        seq_sidebar_layout.setContentsMargins(0, 0, 0, 0)
-
-        seq_sidebar_layout.addWidget(QLabel("<b>Saved Sequences</b>"))
-        self.saved_seq_list = QListWidget()
-        seq_sidebar_layout.addWidget(self.saved_seq_list)
-
-        saved_btn_layout1 = QHBoxLayout()
-        btn_save = QPushButton("💾 Save")
-        btn_save.clicked.connect(self.save_sequence_dialog)
-        btn_load = QPushButton("📂 Load")
-        btn_load.clicked.connect(self.load_selected_sequence)
-        btn_queue = QPushButton("▶ Queue")
-        btn_queue.clicked.connect(self.queue_selected_sequence)
-
-        saved_btn_layout1.addWidget(btn_save)
-        saved_btn_layout1.addWidget(btn_load)
-        saved_btn_layout1.addWidget(btn_queue)
-        seq_sidebar_layout.addLayout(saved_btn_layout1)
-
-        saved_btn_layout2 = QHBoxLayout()
-        btn_rename = QPushButton("✏ Rename")
-        btn_rename.clicked.connect(self.rename_selected_sequence)
-        btn_delete = QPushButton("🗑 Delete")
-        btn_delete.clicked.connect(self.delete_selected_sequence)
-
-        saved_btn_layout2.addWidget(btn_rename)
-        saved_btn_layout2.addWidget(btn_delete)
-        seq_sidebar_layout.addLayout(saved_btn_layout2)
-
-        seq_sidebar_layout.addWidget(QLabel("<b>Execution Queue</b>"))
-        self.queue_list = QListWidget()
-        self.queue_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        seq_sidebar_layout.addWidget(self.queue_list)
-
-        page.addWidget(seq_sidebar)
-        page.addWidget(self.build_sequencer_tab())
-        page.setSizes([260, 900])
-        self.seq_splitter = page
-        return page
-
-    def build_sequencer_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        self.seq_table = QTableWidget(0, 4)
-        self.seq_table.setHorizontalHeaderLabels(["Pump", "Channel", "Action", "Parameters"])
-        header = self.seq_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.seq_table.setColumnWidth(0, 250)
-        self.seq_table.setColumnWidth(1, 80)
-        self.seq_table.setColumnWidth(2, 120)
-        self.seq_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        layout.addWidget(self.seq_table)
-
-        btn_layout = QHBoxLayout()
-        self.step_type_combo = QComboBox()
-        self.step_type_combo.addItems(
-            [
-                "Dose",
-                "Dose (Async)",
-                "Staccato",
-                "Staccato (Async)",
-                "Pause",
-                "Wait for All",
-                "Run Sub-Sequence",
-            ]
-        )
-        btn_add_step = QPushButton("+ Add Step")
-        btn_add_step.clicked.connect(lambda: self.add_sequence_step(self.step_type_combo.currentText()))
-
-        btn_rem_step = QPushButton("- Remove")
-        btn_rem_step.clicked.connect(self.remove_sequence_step)
-
-        btn_clear_all = QPushButton("🗑 Clear All")
-        btn_clear_all.clicked.connect(self.clear_all_sequence_steps)
-
-        btn_up = QPushButton("🔼 Up")
-        btn_up.clicked.connect(self.move_sequence_step_up)
-        btn_down = QPushButton("🔽 Down")
-        btn_down.clicked.connect(self.move_sequence_step_down)
-
-        btn_layout.addWidget(self.step_type_combo)
-        btn_layout.addWidget(btn_add_step)
-        btn_layout.addWidget(btn_rem_step)
-        btn_layout.addWidget(btn_clear_all)
-        btn_layout.addWidget(btn_up)
-        btn_layout.addWidget(btn_down)
-        layout.addLayout(btn_layout)
-
-        # Save / Load Sequence
-        io_layout = QHBoxLayout()
-        btn_save_seq = QPushButton("Save Sequence As...")
-        btn_save_seq.clicked.connect(self.save_sequence_dialog)
-        btn_load_seq = QPushButton("Load Sequence...")
-        btn_load_seq.clicked.connect(self.load_sequence_dialog)
-        io_layout.addWidget(btn_save_seq)
-        io_layout.addWidget(btn_load_seq)
-        layout.addLayout(io_layout)
-
-        bottom_layout = QHBoxLayout()
-        self.btn_run_seq = QPushButton("▶ Queue Current Table")
-        self.btn_run_seq.setStyleSheet(
-            "background-color: #28A745; color: white; font-weight: bold; padding: 10px;"
-        )
-        self.btn_run_seq.clicked.connect(self.queue_current_table)
-
-        bottom_layout.addWidget(self.btn_run_seq)
-        layout.addLayout(bottom_layout)
-
-        self.sequence_task = None
-        return widget
 
     # --- Cloud API Networking Logic ---
     async def login_and_fetch(self):
@@ -1809,8 +1655,6 @@ class JebaoPumpGUI(QMainWindow):
     def names_changed(self):
         """Pump or head names were edited in the Rack tab: show them everywhere."""
         self.refresh_pumps()
-        if hasattr(self, "seq_table") and self.seq_table.rowCount():
-            self._apply_sequence_data(self._get_sequence_data())
 
     def refresh_pumps(self):
         """Show the current pump list and layout in every tab."""
@@ -1821,11 +1665,8 @@ class JebaoPumpGUI(QMainWindow):
             key=lambda d: order.index(d.get("did")) if d.get("did") in order else len(order)
         )
 
-        # Re-populate sequence table if it's empty
-        if hasattr(self, "seq_table") and self.seq_table.rowCount() == 0:
-            if self.config.data.get("sequence"):
-                self._apply_sequence_data(self.config.data["sequence"])
-
+        if hasattr(self, "sequencer_tab"):
+            self.sequencer_tab.rebuild()
         if hasattr(self, "manual_tab"):
             self.manual_tab.rebuild()
         if hasattr(self, "calibration_tab"):
@@ -1845,8 +1686,13 @@ class JebaoPumpGUI(QMainWindow):
         self.calibration_tab._watch_cancel()
         self.refresh_guard_banner()
         current = self.tabs.currentWidget()
-        if current in (self.manual_tab, self.calibration_tab):
+        if current in (self.manual_tab, self.calibration_tab, self.sequencer_tab):
             current.refresh()
+        running = self.run_active()
+        name = "Sequencer ●" if running else "Sequencer"
+        index = self.tabs.indexOf(self.sequencer_tab)
+        if self.tabs.tabText(index) != name:
+            self.tabs.setTabText(index, name)
 
     def calibration_running(self):
         tab = getattr(self, "calibration_tab", None)
@@ -1884,485 +1730,525 @@ class JebaoPumpGUI(QMainWindow):
             label.setStyleSheet("color: #DC3545; font-weight: bold; font-size: 14px;")
             label.setText("DISCONNECTED")
 
-    # --- Calibration Logic ---
-    # --- Sequencer Control ---
-    def add_sequence_step(self, action_type):
-        row = self.seq_table.rowCount()
-        self.seq_table.insertRow(row)
+    # --- Sequences: the queue and the runs ---------------------------------------------------
+    # The steps, plans and run state are in sequence.py; the tab is sequencer_tab.py.
 
-        # Pump Dropdown
-        pump_cb = QComboBox()
-        for d in self.cloud_devices:
-            pump_cb.addItem(self.get_device_name(d.get("did")), userData=d.get("did"))
-        self.seq_table.setCellWidget(row, 0, pump_cb)
-        # Channel Dropdown
-        ch_cb = CheckableComboBox()
-        ch_cb.addItems(["1", "2", "3", "4"])
-        ch_cb.setCheckedItems(["1"])  # Default to channel 1 checked
-        self.seq_table.setCellWidget(row, 1, ch_cb)
+    def _head_rate(self, did, ch):
+        """A head's calibrated flow rate in mL/min, or None (a pump the app hasn't seen gets none)."""
+        pump = (self.config.data.get("pumps") or {}).get(did)
+        try:
+            rate = float((pump or {}).get("calibration", [])[ch - 1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return rate if rate > 0 else None
 
-        # Action Dropdown
-        act_cb = QComboBox()
-        act_cb.addItems(
-            [
-                "Dose",
-                "Dose (Async)",
-                "Staccato",
-                "Staccato (Async)",
-                "Pause",
-                "Pause (User Review)",
-                "Wait for All",
-                "Run Sub-Sequence",
-            ]
+    def plan_context(self):
+        """What sequence.plan() needs to know about the pumps, from the settings and the cloud."""
+        pumps = self.config.data.get("pumps") or {}
+        listed = {d.get("did"): d for d in self.cloud_devices}
+
+        def calibrated_at(did, ch):
+            dates = (pumps.get(did) or {}).get("calibrated_at") or []
+            return dates[ch - 1] if 0 < ch <= len(dates) else None
+
+        def online(did):
+            d = listed.get(did)
+            return None if d is None else bool(d.get("is_online", False))
+
+        return sequence.Context(
+            rate=self._head_rate,
+            calibrated_at=calibrated_at,
+            online=online,
+            limit=self.head_limit,
+            saved=lambda name: (self.config.data.get("saved_sequences") or {}).get(name),
+            head_name=self.config.head_name,
+            pump_name=self.get_device_name,
+            known=(lambda did: did in listed) if listed else None,
         )
-        act_cb.setCurrentText(action_type)
-        act_cb.currentTextChanged.connect(self.on_action_type_changed)
-        self.seq_table.setCellWidget(row, 2, act_cb)
 
-        # Parameters Widget
-        val_widget = QStackedWidget()
+    def plan_sequence(self, steps, name=None, with_limit=True):
+        return sequence.plan(steps, self.plan_context(), name=name, with_limit=with_limit)
 
-        spin_widget = QWidget()
-        spin_layout = QHBoxLayout(spin_widget)
-        spin_layout.setContentsMargins(0, 0, 0, 0)
-
-        spin1 = QDoubleSpinBox()
-        spin1.setDecimals(1)
-        spin1.setMaximum(10000.0)
-        spin1.setToolTip("Total Volume (mL) / Pause Time (s)")
-
-        spin2 = QDoubleSpinBox()
-        spin2.setDecimals(1)
-        spin2.setMaximum(1000.0)
-        spin2.setToolTip("Burst Volume (mL)")
-
-        spin3 = QDoubleSpinBox()
-        spin3.setDecimals(1)
-        spin3.setMaximum(3600.0)
-        spin3.setToolTip("Wait Time Between Bursts (s)")
-
-        spin_layout.addWidget(spin1)
-        spin_layout.addWidget(spin2)
-        spin_layout.addWidget(spin3)
-
-        sub_seq_cb = QComboBox()
-        sub_seq_cb.setToolTip("Select Saved Sequence")
-
-        val_widget.addWidget(spin_widget)
-        val_widget.addWidget(sub_seq_cb)
-
-        val_widget.spins = [spin1, spin2, spin3]
-        val_widget.sub_seq_cb = sub_seq_cb
-
-        self.seq_table.setCellWidget(row, 3, val_widget)
-
-        self._update_row_ui(row, action_type)
-        self.auto_save_sequence()
-
-    def _update_row_ui(self, row, action_type):
-        pump_cb = self.seq_table.cellWidget(row, 0)
-        val_widget = self.seq_table.cellWidget(row, 3)
-        if not hasattr(val_widget, "spins"):
-            return
-        spin1, spin2, spin3 = val_widget.spins
-        sub_seq_cb = val_widget.sub_seq_cb
-
-        if action_type in ["Pause", "Pause (User Review)", "Wait for All", "Run Sub-Sequence"]:
-            pump_cb.setEnabled(False)
-            blank_style = "QComboBox { color: transparent; background: transparent; border: none; } \nQComboBox::drop-down { border: none; }"
-            pump_cb.setStyleSheet(blank_style)
+    def enqueue(self, name, steps, front=False):
+        """Add a sequence to the queue (``front``: next). False if it has no steps."""
+        steps = sequence.normalize_all(steps)
+        if not steps:
+            logger.warning("Nothing to run: the sequence has no steps.")
+            return False
+        item = {"name": name or "Untitled sequence", "data": sequence.to_saved_all(steps)}
+        if front:
+            self.sequence_queue.insert(0, item)
         else:
-            pump_cb.setEnabled(True)
-            pump_cb.setStyleSheet("")
+            self.sequence_queue.append(item)
+        self.refresh_queue_ui()
+        running = self.sequence_task is not None and not self.sequence_task.done()
+        if self.queue_paused:
+            logger.info(f"Added “{item['name']}” to the queue (the queue is paused).")
+        elif running or len(self.sequence_queue) > 1:
+            logger.info(f"Added “{item['name']}” to the queue.")
+        return True
 
-        if action_type == "Run Sub-Sequence":
-            val_widget.setCurrentIndex(1)
-            if sub_seq_cb is not None:
-                sub_seq_cb.clear()
-                saved = list(self.config.data.get("saved_sequences", {}).keys())
-                sub_seq_cb.addItems(saved)
-        else:
-            val_widget.setCurrentIndex(0)
-            if action_type in ["Wait for All", "Pause (User Review)"]:
-                spin1.hide()
-                spin2.hide()
-                spin3.hide()
-            elif action_type == "Pause":
-                spin1.show()
-                spin1.setToolTip("Duration (sec)")
-                spin1.setPrefix("Wait: ")
-                spin1.setSuffix(" s")
-                spin2.hide()
-                spin3.hide()
-            elif "Staccato" in action_type:
-                spin1.show()
-                spin1.setToolTip("Total Volume (mL)")
-                spin1.setPrefix("")
-                spin1.setSuffix(" mL")
-                spin2.show()
-                spin3.show()
-            else:  # Dose, Dose (Async)
-                spin1.show()
-                spin1.setToolTip("Total Volume (mL)")
-                spin1.setPrefix("")
-                spin1.setSuffix(" mL")
-                spin2.hide()
-                spin3.hide()
-        if "Dose" in action_type:
-            spin1.setToolTip("Volume (mL)")
-            spin1.setPrefix("Vol: ")
-            spin1.setSuffix(" mL")
-            spin2.hide()
-            spin3.hide()
-        elif action_type == "Pause":
-            spin1.setToolTip("Duration (sec)")
-            spin1.setPrefix("Wait: ")
-            spin1.setSuffix(" s")
-            spin2.hide()
-            spin3.hide()
-        elif "Staccato" in action_type:
-            spin1.setToolTip("Total Volume (mL)")
-            spin1.setPrefix("Total: ")
-            spin1.setSuffix(" mL")
-            spin2.setToolTip("Burst Volume (mL)")
-            spin2.setPrefix("Burst: ")
-            spin2.setSuffix(" mL")
-            spin3.setToolTip("Wait Time (sec)")
-            spin3.setPrefix("Wait: ")
-            spin3.setSuffix(" s")
-        elif action_type == "Wait for All":
-            spin1.hide()
-            spin2.hide()
-            spin3.hide()
+    def run_active(self):
+        task = self.sequence_task
+        return task is not None and not task.done()
 
-    def on_action_type_changed(self, action_type):
-        sender = self.sender()
-        if not sender:
+    def set_queue_paused(self, paused):
+        if paused == self.queue_paused:
             return
-        for r in range(self.seq_table.rowCount()):
-            if self.seq_table.cellWidget(r, 2) == sender:
-                self._update_row_ui(r, action_type)
-                self.auto_save_sequence()
-                break
+        self.queue_paused = paused
+        if paused:
+            logger.info("Queue paused: the next sequence won't start until you untick “Pause the queue”.")
+        elif self.sequence_queue:
+            logger.info("Queue running again.")
+        self.refresh_queue_ui()
 
-    def remove_sequence_step(self):
-        row = self.seq_table.currentRow()
-        if row >= 0:
-            self.seq_table.removeRow(row)
-            self.auto_save_sequence()
+    def run_stopping(self):
+        """True while a run is being stopped (its heads are being turned off)."""
+        run = self.seq_run
+        return bool(run is not None and run.stopping and not run.ended)
 
-    def clear_all_sequence_steps(self):
-        reply = QMessageBox.question(
-            self,
-            "Clear All Steps",
-            "Are you sure you want to delete all steps in the current sequence?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.seq_table.setRowCount(0)
-            self.auto_save_sequence()
+    def stop_run(self, why="you pressed Stop run"):
+        """Stop the running sequence (its pumps turn off) and pause the queue."""
+        if not self.run_active() or self.run_stopping():
+            return
+        self.queue_paused = True
+        self._stop_reason = why
+        if self.seq_run is not None:
+            self.seq_run.stopping = True  # from now on Stop and Skip do nothing more
+        logger.warning(f"Stopping “{self.current_running_sequence}”: {why}. The queue is paused.")
+        self.sequence_task.cancel()
+        for tasks in self._ch_running_tasks.values():
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        self.refresh_queue_ui()
 
-    def move_sequence_step_up(self):
-        row = self.seq_table.currentRow()
-        if row > 0:
-            seq = self._get_sequence_data()
-            seq[row], seq[row - 1] = seq[row - 1], seq[row]
-            self._apply_sequence_data(seq)
-            self.seq_table.selectRow(row - 1)
+    def lanes_in_use(self):
+        run = self.seq_run
+        if run is None or run.ended:
+            return []
+        return [ch for ch, ls in run.lanes.items() if ls.status not in ("idle", "done")]
 
-    def move_sequence_step_down(self):
-        row = self.seq_table.currentRow()
-        if row >= 0 and row < self.seq_table.rowCount() - 1:
-            seq = self._get_sequence_data()
-            seq[row], seq[row + 1] = seq[row + 1], seq[row]
-            self._apply_sequence_data(seq)
-            self.seq_table.selectRow(row + 1)
+    def pause_lane(self, ch, paused):
+        """Pause one lane (CH1–CH4) of the running sequence: its heads turn off and its
+        timers stop until it is resumed. Waits for you and sync points aren't affected."""
+        if self._ch_paused.get(ch) == paused:
+            return
+        self._ch_paused[ch] = paused
+        if paused:
+            self._ch_resume_events[ch].clear()
+            logger.info(f"[CH{ch}] Paused.")
+        else:
+            self._ch_resume_events[ch].set()
+            logger.info(f"[CH{ch}] Resumed.")
+
+    def pause_run(self, paused):
+        for ch in self.lanes_in_use() or list(sequence.LANES):
+            self.pause_lane(ch, paused)
+
+    def skip_step(self, ch):
+        """Skip the step a lane is on now (its heads turn off); the lane goes on with the next one."""
+        task = self._ch_step_tasks.get(ch)
+        item = self._ch_current.get(ch)
+        if task is None or task.done() or item is None or self.run_stopping():
+            return False
+        self._skip[ch] = item.path
+        logger.warning(f"[CH{ch} · step {item.top + 1}] Skipping {sequence.title(item.step)}.")
+        task.cancel()
+        return True
 
     async def _queue_worker(self):
-        told = False
-        while True:
-            if not self.sequence_queue:
-                self.current_running_sequence = None
-                await asyncio.sleep(0.5)
-                continue
-            if self.calibration_running():
-                if not told:
-                    logger.info("A sequence is queued: it will start when the calibration has finished.")
-                    told = True
-                await asyncio.sleep(0.5)
-                continue
-            told = False
+        if getattr(self, "_queue_worker_on", False):
+            return  # one is enough: two would start two runs at once
+        self._queue_worker_on = True
+        try:
+            await self._work_the_queue()
+        finally:
+            self._queue_worker_on = False
 
-            seq_item = self.sequence_queue.pop(0)
-            seq_name = seq_item["name"]
-            seq_data = seq_item["data"]
-            self.current_running_sequence = seq_name
+    async def _work_the_queue(self):
+        while True:
+            try:
+                await self._queue_step()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # never let the queue stop by itself
+                logger.error(f"The sequence queue hit an error ({e}); it carries on.")
+                if not self.run_active():
+                    self.current_running_sequence = None
+                await asyncio.sleep(1)
+
+    async def _queue_step(self):
+        """Start the next queued run if it may start (and wait for it), else wait a moment."""
+        held = self.queue_paused and not self._run_one
+        if not self.sequence_queue or held or self.run_active():
+            if not self.run_active():
+                self.current_running_sequence = None
+            await asyncio.sleep(0.5)
+            return
+        if self.calibration_running():
+            if not self._told_calibration:
+                logger.info("A sequence is queued: it will start when the calibration has finished.")
+                self._told_calibration = True
+            await asyncio.sleep(0.5)
+            return
+        self._told_calibration = False
+        self._run_one = False
+        await self._run_queued(self.sequence_queue.pop(0))
+
+    async def _run_queued(self, seq_item):
+        seq_name = seq_item.get("name") or "Untitled sequence"
+        self.current_running_sequence = seq_name
+        self._stop_reason = ""
+        outcome = "stopped"
+        try:
+            self.refresh_queue_ui()
+            self.sequence_task = asyncio.create_task(
+                self._async_run_sequence(seq_name, seq_item.get("data") or [])
+            )
+            outcome = await self.sequence_task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise  # the app is closing
+            outcome = "stopped"
+        except Exception as e:
+            logger.error(f"“{seq_name}” stopped because of an error: {e}")
+            outcome = "failed"
+        finally:
+            self.current_running_sequence = None
+            self.refresh_queue_ui()
+        if outcome != "done" and self.sequence_queue and not self.queue_paused:
+            self.queue_paused = True
+            logger.warning(
+                "The queue is paused because that run didn't finish. Untick “Pause the queue” "
+                "in the Sequencer tab to start the next one."
+            )
             self.refresh_queue_ui()
 
-            logger.info(f"=== STARTING SEQUENCE: {seq_name} ===")
-            try:
-                self.sequence_task = asyncio.create_task(self._async_run_sequence(seq_name, seq_data))
-                await self.sequence_task
-                logger.info(f"=== SEQUENCE '{seq_name}' COMPLETED SUCCESSFULLY ===")
-            except asyncio.CancelledError:
-                logger.warning(f"=== SEQUENCE '{seq_name}' ABORTED ===")
-            except Exception as e:
-                logger.error(f"Sequence aborted due to error: {e}")
-            finally:
-                self.current_running_sequence = None
-                self.refresh_queue_ui()
+    def run_next_now(self):
+        """Start the first queued run even though the queue is paused (the rest stay paused)."""
+        if self.queue_paused:
+            self._run_one = True
 
     def queue_current_table(self):
-        seq_data = self._get_sequence_data()
-        if not seq_data:
-            logger.warning("Cannot queue empty sequence.")
-            return
-
-        name = f"Ad-hoc Sequence ({len(self.sequence_queue) + 1})"
-        self.sequence_queue.append({"name": name, "data": seq_data})
-        self.refresh_queue_ui()
-        logger.info(f"Added '{name}' to queue.")
-
-    def queue_selected_sequence(self):
-        item = self.saved_seq_list.currentItem()
-        if not item:
-            return
-        name = item.text()
-        seq_data = self.config.data.get("saved_sequences", {}).get(name)
-        if seq_data:
-            self.sequence_queue.append({"name": name, "data": seq_data})
-            self.refresh_queue_ui()
-            logger.info(f"Added '{name}' to queue.")
-
-    def load_selected_sequence(self):
-        item = self.saved_seq_list.currentItem()
-        if not item:
-            return
-        name = item.text()
-        seq_data = self.config.data.get("saved_sequences", {}).get(name)
-        if seq_data:
-            self._apply_sequence_data(seq_data)
-            logger.info(f"Loaded sequence '{name}' into table.")
-
-    def rename_selected_sequence(self):
-        item = self.saved_seq_list.currentItem()
-        if not item:
-            return
-        old_name = item.text()
-
-        new_name, ok = QInputDialog.getText(self, "Rename Sequence", "New Sequence Name:", text=old_name)
-        if ok and new_name and new_name != old_name:
-            if new_name in self.config.data.get("saved_sequences", {}):
-                QMessageBox.warning(self, "Error", "A sequence with this name already exists!")
-                return
-
-            seq_data = self.config.data["saved_sequences"].pop(old_name)
-            self.config.data["saved_sequences"][new_name] = seq_data
-            self.config.save()
-            self.refresh_saved_sequences_ui()
-            logger.info(f"Renamed sequence '{old_name}' to '{new_name}'")
-
-    def delete_selected_sequence(self):
-        item = self.saved_seq_list.currentItem()
-        if not item:
-            return
-        name = item.text()
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Are you sure you want to delete '{name}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.config.data["saved_sequences"].pop(name, None)
-            self.config.save()
-            self.refresh_saved_sequences_ui()
-            logger.info(f"Deleted sequence '{name}'")
+        """The Sequencer tab's sequence, to the end of the queue."""
+        tab = getattr(self, "sequencer_tab", None)
+        if tab is not None:
+            tab.add_to_queue()
 
     def refresh_saved_sequences_ui(self):
-        # Refresh the sidebar
-        self.saved_seq_list.clear()
-        saved = self.config.data.get("saved_sequences", {})
-        for name in saved.keys():
-            self.saved_seq_list.addItem(name)
-
-        # Refresh any open Sub-Sequence dropdowns in the table
-        for r in range(self.seq_table.rowCount()):
-            act_cb = self.seq_table.cellWidget(r, 2)
-            if act_cb and act_cb.currentText() == "Run Sub-Sequence":
-                val_widget = self.seq_table.cellWidget(r, 3)
-                if val_widget and hasattr(val_widget, "sub_seq_cb"):
-                    sub_seq_cb = val_widget.sub_seq_cb
-                    if sub_seq_cb is not None:
-                        current = sub_seq_cb.currentText()
-                        sub_seq_cb.clear()
-                        sub_seq_cb.addItems(list(saved.keys()))
-                        sub_seq_cb.setToolTip("Select Saved Sequence")
-                        if current in saved:
-                            sub_seq_cb.setCurrentText(current)
+        tab = getattr(self, "sequencer_tab", None)
+        if tab is not None:
+            tab.refresh_library()
 
     def refresh_queue_ui(self):
-        self.queue_list.clear()
-        if self.current_running_sequence:
-            item = QListWidgetItem(f"▶ {self.current_running_sequence}")
-            item.setForeground(QColor("#28A745"))
-            self.queue_list.addItem(item)
-
-        for i, q in enumerate(self.sequence_queue):
-            self.queue_list.addItem(f"{i + 1}. {q['name']}")
+        tab = getattr(self, "sequencer_tab", None)
+        if tab is not None:
+            tab.refresh_queue()
 
     async def _async_run_sequence(self, seq_name, seq_data, call_stack=None):
-        logger.info("=== STARTING INDEPENDENT MULTI-CHANNEL SEQUENCE ===")
-        sync_barriers = {}
-        self._ch_running_tasks = {1: [], 2: [], 3: [], 4: []}
+        """Run a sequence: each lane (CH1–CH4) goes through its own steps, side by side.
 
-        tasks = []
-        for ch in [1, 2, 3, 4]:
-            task = asyncio.create_task(
-                self._run_channel_sequence(ch, seq_name, seq_data, set(), sync_barriers)
-            )
-            tasks.append(task)
-
+        Returns "done", "failed" (a step failed, e.g. a pump wouldn't turn on, and the rest
+        was stopped) or "stopped" (a head was cancelled in the Manual tab). Stop run and
+        Emergency Stop cancel it. However it ends, every head it ran is sent OFF and the run
+        goes into the run history.
+        """
+        steps = sequence.normalize_all(seq_data)
+        plan = self.plan_sequence(steps, name=seq_name)
+        run = sequence.RunState(seq_name, steps, plan.flat, plan=plan)
+        self.seq_run = run
+        self._ch_running_tasks = {ch: [] for ch in sequence.LANES}
+        self._ch_step_tasks = {}
+        self._ch_current = {}
+        self._skip = {}
+        self._sync_points = {}
+        self._run_problem = None
+        for ch in sequence.LANES:
+            self._ch_paused[ch] = False
+            self._ch_resume_events[ch].set()
+        for check in plan.checks:
+            if check.level == "error":
+                logger.warning(f"[{seq_name}] {check.text}")
+        lanes = sorted({ch for item in plan.flat for ch in item.lanes})
+        logger.info(
+            f"=== Starting “{seq_name}”: {len(steps)} step{'s' if len(steps) != 1 else ''} on "
+            f"{sequence.lanes_text(lanes)}, about {sequence.fmt_time(plan.total_s)} ==="
+        )
+        self._lane_tasks = {ch: asyncio.create_task(self._run_lane(ch, run)) for ch in lanes}
+        outcome, why = "done", ""
         try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in pending:
-                task.cancel()
-
-            for task in done:
-                exc = task.exception()
-                if exc:
-                    raise exc
-
-            all_running = []
-            for ch in [1, 2, 3, 4]:
-                all_running.extend(self._ch_running_tasks[ch])
-
-            if all_running:
-                logger.info(
-                    "Sequence ended, but async tasks are still running. Waiting for them to finish..."
-                )
-                await asyncio.gather(*all_running, return_exceptions=True)
-
-            logger.info("=== SPE SEQUENCE COMPLETED SUCCESSFULLY ===")
+            pending = set(self._lane_tasks.values())
+            while pending and outcome == "done":
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.cancelled():
+                        outcome, why = self._run_problem or (
+                            "stopped",
+                            "a head was stopped in the Manual tab",
+                        )
+                    elif task.exception() is not None:
+                        outcome, why = "failed", str(task.exception()).rstrip(".")
         except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            logger.warning("SEQUENCE CANCELLED VIA EMERGENCY STOP.")
-        except Exception as e:
-            for task in tasks:
-                task.cancel()
-            logger.error(f"Sequence aborted due to error: {e}")
+            outcome, why = "stopped", self._stop_reason or "Emergency Stop"
+            raise
         finally:
-            for ch in range(1, 5):
+            run.stopping = True
+            leftovers = list(self._lane_tasks.values())
+            for tasks in self._ch_running_tasks.values():
+                leftovers += tasks
+            for task in leftovers:
+                if not task.done():
+                    task.cancel()
+            # Each sends its own OFF. Another Stop or Emergency Stop meanwhile doesn't cut
+            # this short: the run only ends once they have.
+            deadline = time.monotonic() + 15
+            while leftovers and time.monotonic() < deadline:
+                waiting = [t for t in leftovers if not t.done()]
+                if not waiting:
+                    break
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait(waiting, timeout=max(0.05, deadline - time.monotonic()))
+            if leftovers:
+                for task in leftovers:
+                    if task.done() and not task.cancelled():
+                        task.exception()
+            for ch in sequence.LANES:
                 if self._ch_review_events.get(ch):
                     self._ch_review_events[ch].set()
                     self._ch_review_events[ch] = None
+                self._ch_paused[ch] = False
+                self._ch_resume_events[ch].set()
+            self._ch_review_titles = {}
             self.refresh_approval_banner()
+            run.finish(outcome, why)
+            self._log_outcome(run)
+            try:
+                sequence.append_history(self.run_history_path, run.record())
+            except OSError as e:
+                logger.warning(f"Couldn't save the run to the run history: {e}")
+            tab = getattr(self, "sequencer_tab", None)
+            if tab is not None:
+                tab.run_finished(run)
+        return outcome
 
-    async def _run_channel_sequence(self, ch, seq_name, seq_data, call_stack, sync_barriers):
-        if seq_name in call_stack:
+    def _log_outcome(self, run):
+        took = sequence.fmt_time(run.elapsed())
+        if run.outcome == "done":
+            skipped = sum(1 for s in run.cells.values() if s == sequence.SKIPPED)
+            extra = f", {skipped} step{'s' if skipped != 1 else ''} skipped" if skipped else ""
+            logger.info(f"=== “{run.name}” finished in {took}{extra}. ===")
+        elif run.outcome == "failed":
             logger.error(
-                f"[CH{ch}] Infinite Recursion Detected! Sub-sequence '{seq_name}' is already running. Aborting this step."
+                f"=== “{run.name}” failed after {took}: {run.why}. Every head it used was sent OFF. ==="
             )
-            return
+        else:
+            at = f" at {run.stopped_at}" if run.stopped_at else ""
+            logger.warning(f"=== “{run.name}” stopped{at} after {took} ({run.why}). ===")
 
-        current_stack = call_stack | {seq_name}
-        running_tasks = self._ch_running_tasks[ch]
+    def _fail_run(self, why, outcome="failed"):
+        """A background step went wrong: stop the whole run."""
+        if self._run_problem is None:
+            self._run_problem = (outcome, why)
+        for task in getattr(self, "_lane_tasks", {}).values():
+            if not task.done():
+                task.cancel()
 
-        for r, step in enumerate(seq_data):
-            channels = step.get("channel", [1])
-            if isinstance(channels, int) or isinstance(channels, str):
-                channels = [int(channels)]
-
-            if ch not in channels:
+    async def _run_lane(self, ch, run):
+        """One lane: its steps in order. A skipped step is cancelled (its heads turn OFF) and
+        the lane goes on; anything else that stops a step stops the run."""
+        me = asyncio.current_task()
+        background = self._ch_running_tasks[ch]
+        for item in [it for it in run.flat if ch in it.lanes]:
+            while self._ch_paused.get(ch, False):  # paused between steps
+                await asyncio.sleep(0.1)
+            self._skip.pop(ch, None)
+            self._ch_current[ch] = item
+            run.begin(ch, item)
+            where = f"CH{ch} · step {item.top + 1}"
+            step = item.step
+            if step["kind"] in sequence.PUMPING and step["background"]:
+                task = asyncio.create_task(self._run_step(ch, item, run, background=True))
+                background.append(task)
+                run.background(ch, item, True)
+                task.add_done_callback(lambda t, item=item: self._background_done(ch, item, run, t))
+                logger.info(f"[{where}] {sequence.title(step)}: started in the background.")
                 continue
+            task = asyncio.create_task(self._run_step(ch, item, run))
+            self._ch_step_tasks[ch] = task
+            try:
+                await task
+            except asyncio.CancelledError:
+                if me.cancelling() or self._skip.get(ch) != item.path:
+                    raise
+                if step["kind"] == "sync":
+                    self._sync_points.setdefault(item.path, sequence.SyncPoint(item.lanes)).arrive(ch)
+                run.end(ch, item, sequence.SKIPPED)
+                continue
+            except Exception as e:
+                run.end(ch, item, sequence.FAILED)
+                logger.error(f"[{where}] {sequence.title(step)} failed: {e}")
+                raise
+            finally:
+                self._ch_step_tasks.pop(ch, None)
+            run.end(ch, item, sequence.DONE)
+        left = [t for t in background if not t.done()]
+        if left:
+            ls = run.lanes[ch]
+            ls.status, ls.title = "sync", "Waiting for its background steps"
+            ls.detail = ""
+            await asyncio.wait(left)
+        run.lane_finished(ch)
 
-            action = step["action"]
-            val1 = step.get("val1", 0)
-            val2 = step.get("val2", 0)
-            val3 = step.get("val3", 0)
+    def _background_done(self, ch, item, run, task):
+        run.background(ch, item, False)
+        if getattr(run, "stopping", False) or run.ended:
+            run.end(ch, item, sequence.STOPPED if task.cancelled() else sequence.DONE)
+            return
+        where = f"CH{ch} · step {item.top + 1}"
+        if task.cancelled():
+            run.end(ch, item, sequence.STOPPED)
+            self._fail_run("a head was stopped in the Manual tab", outcome="stopped")
+            return
+        exc = task.exception()
+        if exc is None:
+            run.end(ch, item, sequence.DONE)
+            logger.info(f"[{where}] {sequence.title(item.step)} (background): done.")
+            return
+        run.end(ch, item, sequence.FAILED)
+        logger.error(f"[{where}] {sequence.title(item.step)} (background) failed: {exc}")
+        self._fail_run(f"step {item.top + 1} on CH{ch} failed: {str(exc).rstrip('.')}")
 
-            pump_did = step.get("pump_did")
-            pump_name = self.get_device_name(pump_did) if pump_did else "Unknown Pump"
+    async def _run_step(self, ch, item, run, background=False):
+        step, kind = item.step, item.step["kind"]
+        where = f"CH{ch} · step {item.top + 1}"
+        ls = run.lanes[ch]
+        if kind == "wait":
+            logger.info(f"[{where}] {sequence.title(step)}.")
 
-            if action == "Run Sub-Sequence":
-                sub_name = step.get("val1", "")
-                sub_data = self.config.data.get("saved_sequences", {}).get(sub_name)
-                if not sub_data:
-                    logger.error(f"[CH{ch} Step {r + 1}] FAILED! Sub-sequence '{sub_name}' not found.")
-                    continue
-                logger.info(f"[CH{ch} Step {r + 1}] -> Entering Sub-Sequence: '{sub_name}'")
-                await self._run_channel_sequence(ch, sub_name, sub_data, current_stack, sync_barriers)
-                logger.info(f"[CH{ch}] <- Returned from Sub-Sequence: '{sub_name}'")
+            def tick(left):
+                ls.detail = f"{sequence.fmt_clock(left)} left"
 
-            elif action == "Pause":
-                logger.info(f"[CH{ch} Step {r + 1}] Pausing for {val1} seconds...")
-                await self._interruptible_sleep_timer(ch, val1)
-
-            elif action == "Pause (User Review)":
-                logger.info(f"[CH{ch} Step {r + 1}] Paused for User Review.")
-
-                event = asyncio.Event()
-                self._ch_review_events[ch] = event
-
-                self.refresh_approval_banner()
-
+            await self._interruptible_sleep_timer(ch, step["seconds"], tick=tick)
+        elif kind == "review":
+            event = asyncio.Event()
+            self._ch_review_events[ch] = event
+            self._ch_review_titles[ch] = f"step {item.top + 1}" + (
+                f": {step['label']}" if step["label"] else ""
+            )
+            self.refresh_approval_banner()
+            if step.get("sound"):
+                QApplication.beep()
+            logger.info(
+                f"[{where}] Waiting for you ({sequence.title(step)}). Press Continue CH{ch} to go on."
+            )
+            try:
                 await event.wait()
-                logger.info(f"[CH{ch} Step {r + 1}] Resumed from User Review.")
+            finally:
+                if self._ch_review_events.get(ch) is event:
+                    self._ch_review_events[ch] = None
+                self._ch_review_titles.pop(ch, None)
+                self.refresh_approval_banner()
+            logger.info(f"[{where}] Continued.")
+        elif kind == "sync":
+            mine = [t for t in self._ch_running_tasks.get(ch, []) if not t.done()]
+            if mine:
+                ls.detail = f"waiting for {len(mine)} background step{'s' if len(mine) != 1 else ''}"
+                await asyncio.wait(mine)
+            point = self._sync_points.setdefault(item.path, sequence.SyncPoint(item.lanes))
+            if not point.event.is_set():
+                others = [c for c in point.waiting_for() if c != ch]
+                ls.detail = "waiting for " + sequence.lanes_text(others) if others else ""
+                logger.info(f"[{where}] Sync: waiting for the other channels.")
+            await point.wait(ch)
+        else:
+            problem = sequence.step_problem(step)
+            if problem:
+                raise RuntimeError(f"{sequence.title(step)}: {problem}, so the run stops here")
+            heads = [key for key in sequence.heads_of(step) if key[1] == ch]
+            await self._together([self._run_head(ch, item, run, key, background) for key in heads])
 
-            elif action == "Wait for All":
-                if running_tasks:
-                    logger.info(
-                        f"[CH{ch} Step {r + 1}] Waiting for {len(running_tasks)} background tasks to finish..."
-                    )
-                    await asyncio.gather(*running_tasks, return_exceptions=True)
-                    running_tasks.clear()
+    async def _run_head(self, ch, item, run, key, background=False):
+        """One head's part of a dose or staccato step."""
+        did, _ = key
+        step = item.step
+        label = self.head_label(did, ch)
+        rate = self._head_rate(did, ch)
+        pattern = sequence.pump_pattern(step, rate)
+        if pattern is None:
+            raise RuntimeError(f"{label} has no flow rate. Calibrate it first.")
+        bursts = sum(1 for what, _ in pattern if what == "pump")
+        pumping = sum(s for what, s in pattern if what == "pump")
+        where = f"CH{ch} · step {item.top + 1}"
+        if (did, ch) in self.head_runs:  # a background step or a manual dose still has it
+            logger.info(f"[{where}] Waiting for {label} to finish what it is doing first.")
+            if not background:
+                run.lanes[ch].detail = f"waiting for {label} to be free"
+            while (did, ch) in self.head_runs:
+                await asyncio.sleep(0.1)
+        logger.info(f"[{where}] {sequence.describe(step)} on {label}: motor on {sequence.fmt_time(pumping)}.")
+        ls = run.lanes[ch]
+        done = 0
+        for what, seconds in pattern:
+            if what == "gap":
 
-                barrier_key = f"{seq_name}_{r}"
-                if barrier_key not in sync_barriers:
-                    sync_barriers[barrier_key] = asyncio.Barrier(len(channels))
+                def tick(left, done=done):
+                    if not background:
+                        ls.detail = f"burst {done} of {bursts} done · next in {sequence.fmt_clock(left)}"
 
-                logger.info(f"[CH{ch} Step {r + 1}] Reached Sync Point. Waiting for other channels...")
-                try:
-                    await sync_barriers[barrier_key].wait()
-                except asyncio.BrokenBarrierError:
-                    pass
-                logger.info(f"[CH{ch} Step {r + 1}] Sync Point complete. Resuming.")
+                await self._interruptible_sleep_timer(ch, seconds, tick=tick)
+                continue
+            done += 1
+            if bursts > 1 and not background:
+                ls.detail = f"burst {done} of {bursts}"
+            meter = []
+            try:
+                await self._timed_run(did, ch, seconds, meter=meter)
+            finally:
+                if rate and meter:
+                    run.add_delivered(label, meter[0] * rate / 60.0, lane=ch, background=background)
 
-            elif "Dose" in action:
-                if "Async" in action:
-                    task = asyncio.create_task(self._do_dose(r, pump_did, pump_name, [ch], val1))
-                    running_tasks.append(task)
-                else:
-                    await self._do_dose(r, pump_did, pump_name, [ch], val1)
+    async def _together(self, coros):
+        """Run several heads' jobs at once. If one fails or is cancelled, the others are
+        stopped too (each sends its own OFF), and the problem is passed on."""
+        tasks = [asyncio.create_task(c) for c in coros]
+        pending = set(tasks)
+        problem = None
+        try:
+            while pending and problem is None:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.cancelled():
+                        problem = problem or asyncio.CancelledError("a head was cancelled")
+                    elif task.exception() is not None:
+                        problem = task.exception()
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.wait(tasks)
+            raise
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending)
+        for task in tasks:  # read every outcome, so none is reported as "never retrieved"
+            if not task.cancelled():
+                task.exception()
+        if problem is not None:
+            raise problem
 
-            elif "Staccato" in action:
-                if "Async" in action:
-                    task = asyncio.create_task(
-                        self._do_staccato(r, pump_did, pump_name, [ch], val1, val2, val3)
-                    )
-                    running_tasks.append(task)
-                else:
-                    await self._do_staccato(r, pump_did, pump_name, [ch], val1, val2, val3)
-
-    async def _interruptible_sleep_timer(self, ch, seconds):
-        duration_left = seconds
-        self._ch_cancelled[ch] = False
-        while duration_left > 0:
-            if self._ch_cancelled.get(ch, False):
-                raise asyncio.CancelledError(f"Channel {ch} sleep cancelled.")
-
-            if self._ch_paused.get(ch, False):
-                await self._ch_resume_events[ch].wait()
-                if self._ch_cancelled.get(ch, False):
-                    raise asyncio.CancelledError(f"Channel {ch} sleep cancelled while paused.")
-
-            chunk = min(0.1, duration_left)
-            start_time = time.time()
+    async def _interruptible_sleep_timer(self, ch, seconds, tick=None):
+        """Wait ``seconds``, stopping the clock while lane ``ch`` is paused."""
+        left = float(seconds)
+        while left > 0:
+            while self._ch_paused.get(ch, False):
+                await asyncio.sleep(0.1)
+            chunk = min(0.1, left)
+            started = time.monotonic()
             await asyncio.sleep(chunk)
-            elapsed = time.time() - start_time
-            duration_left -= elapsed
+            left -= time.monotonic() - started
+            if tick is not None:
+                tick(max(0.0, left))
 
     def _begin_head_run(self, did, ch, seconds, source):
         run = HeadRun(did=did, ch=ch, duration=float(seconds), remaining=float(seconds), source=source)
@@ -2379,12 +2265,12 @@ class JebaoPumpGUI(QMainWindow):
         text = f"{self.get_device_name(did)} · CH{ch}"
         return f"{text} ({name})" if name else text
 
-    async def _interruptible_motor_run(self, ch, pump_did, seconds, source="sequence"):
+    async def _interruptible_motor_run(self, ch, pump_did, seconds, source="sequence", meter=None):
         """Keep a head's motor on for ``seconds``, honouring pause and cancel.
 
         A sequence's channel can be paused or cancelled as a whole (``_ch_paused`` /
         ``_ch_cancelled``); any single head can also be paused or cancelled from the
-        Manual tab (its ``HeadRun``).
+        Manual tab (its ``HeadRun``). ``meter`` (a list) gets the seconds it really pumped.
         """
         channel_key = f"channe{ch}"
         by_channel = source == "sequence"
@@ -2400,10 +2286,10 @@ class JebaoPumpGUI(QMainWindow):
                 if run.paused or (by_channel and self._ch_paused.get(ch, False)):
                     await self.send_cloud_command(pump_did, {channel_key: False})
                     logger.info(f"[{self.head_label(pump_did, ch)}] Paused mid-dose. Waiting to resume...")
-                    if run.paused:
-                        await run.resume.wait()
-                    else:
-                        await self._ch_resume_events[ch].wait()
+                    while (
+                        run.paused or (by_channel and self._ch_paused.get(ch, False))
+                    ) and not run.cancelled:
+                        await asyncio.sleep(0.1)  # resumed, or cancelled, from either place
                     if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
                         raise asyncio.CancelledError(f"Channel {ch} dose cancelled while paused.")
                     logger.info(f"[{self.head_label(pump_did, ch)}] Resuming ({run.remaining:.1f} s left).")
@@ -2421,6 +2307,8 @@ class JebaoPumpGUI(QMainWindow):
                 run.remaining -= time.time() - start_time
         finally:
             self._end_head_run(run)
+            if meter is not None:
+                meter.append(max(0.0, run.duration - max(0.0, run.remaining)))
 
     async def _rest_head(self, run, by_channel):
         """The head used up its on-time budget: turn it off, wait, then carry on."""
@@ -2564,73 +2452,14 @@ class JebaoPumpGUI(QMainWindow):
                 run.cancelled = True
                 run.resume.set()
 
-    async def _do_dose(self, r, pump_did, pump_name, channels, val1):
-        if not pump_did:
-            logger.error(f"[Step {r + 1}] FAILED! Invalid pump selection.")
-            return
-
-        if isinstance(channels, int) or isinstance(channels, str):
-            channels = [int(channels)]
-
-        async def run_channel(ch):
-            rate = self.config.get_pump(pump_did)["calibration"][ch - 1]
-            seconds = (val1 / rate) * 60.0
-
-            logger.info(
-                f"[Step {r + 1}] Dosing {val1}mL on {pump_name} CH{ch} (Running motor for {seconds:.1f}s)"
-            )
-
-            await self._timed_run(pump_did, ch, seconds)
-
-        tasks = [run_channel(ch) for ch in channels]
-        await asyncio.gather(*tasks)
-
-    async def _do_staccato(self, r, pump_did, pump_name, channels, val1, val2, val3):
-        if not pump_did:
-            logger.error(f"[Step {r + 1}] FAILED! Invalid pump selection.")
-            return
-
-        if isinstance(channels, int) or isinstance(channels, str):
-            channels = [int(channels)]
-
-        async def run_channel(ch):
-            rate = self.config.get_pump(pump_did)["calibration"][ch - 1]
-            total_vol = val1
-            burst_vol = val2
-            wait_sec = val3
-
-            burst_seconds = (burst_vol / rate) * 60.0
-            bursts_needed = int(total_vol // burst_vol)
-            remainder_vol = total_vol % burst_vol
-            remainder_seconds = (remainder_vol / rate) * 60.0
-
-            logger.info(
-                f"[Step {r + 1}] Staccato Dosing {total_vol}mL on {pump_name} CH{ch}. Burst: {burst_vol}mL ({burst_seconds:.1f}s), Wait: {wait_sec}s"
-            )
-
-            for b in range(bursts_needed):
-                logger.info(f"  -> [Step {r + 1}] CH{ch} Burst {b + 1}/{bursts_needed}")
-                await self._timed_run(pump_did, ch, burst_seconds)
-                if b < bursts_needed - 1 or remainder_vol > 0:
-                    await self._interruptible_sleep_timer(ch, wait_sec)
-
-            if remainder_vol > 0.01:
-                logger.info(
-                    f"  -> [Step {r + 1}] CH{ch} Final Burst: {remainder_vol:.1f}mL ({remainder_seconds:.1f}s)"
-                )
-                await self._timed_run(pump_did, ch, remainder_seconds)
-
-        tasks = [run_channel(ch) for ch in channels]
-        await asyncio.gather(*tasks)
-
-    async def _timed_run(self, did, ch, seconds, source="sequence"):
+    async def _timed_run(self, did, ch, seconds, source="sequence", meter=None):
         """ON, keep it on for ``seconds`` (pausing, cancelling and resting as needed), OFF.
         The OFF is sent however the run ends, even if the step is cancelled or fails."""
         channel_key = f"channe{ch}"
         try:
             if not self.guard.over_limit((did, ch)):  # over it: the run rests first, then turns on
                 await self._turn_on(did, ch)
-            await self._interruptible_motor_run(ch, did, seconds, source)
+            await self._interruptible_motor_run(ch, did, seconds, source, meter=meter)
         finally:
             await self.send_cloud_command(did, {channel_key: False})
 
@@ -2659,7 +2488,10 @@ class JebaoPumpGUI(QMainWindow):
             self.refresh_queue_ui()
 
         self.guard.hold(15)  # nothing may turn on for a moment, even a command already on its way
+        self._stop_reason = "Emergency Stop"
         if self.sequence_task and not self.sequence_task.done():
+            if self.seq_run is not None and not self.seq_run.ended:
+                self.seq_run.stopping = True
             self.sequence_task.cancel()
         for tasks in getattr(self, "_ch_running_tasks", {}).values():  # Async Dose/Staccato steps
             for task in tasks:
@@ -2697,135 +2529,6 @@ class JebaoPumpGUI(QMainWindow):
             )
         else:
             logger.info(f"Sent STOP command to all channels on all {len(dids)} pump(s).")
-
-    # --- Sequence Persistence ---
-    def _get_sequence_data(self):
-        seq = []
-        for r in range(self.seq_table.rowCount()):
-            pump_cb = self.seq_table.cellWidget(r, 0)
-            ch_cb = self.seq_table.cellWidget(r, 1)
-            action = self.seq_table.cellWidget(r, 2).currentText()
-            val_widget = self.seq_table.cellWidget(r, 3)
-            if not hasattr(val_widget, "spins"):
-                continue
-
-            spins = val_widget.spins
-            sub_seq_cb = val_widget.sub_seq_cb
-
-            if action == "Run Sub-Sequence":
-                val1 = sub_seq_cb.currentText() if sub_seq_cb is not None else ""
-                val2 = 0
-                val3 = 0
-            else:
-                val1 = spins[0].value() if spins else 0
-                val2 = spins[1].value() if len(spins) > 1 else 0
-                val3 = spins[2].value() if len(spins) > 2 else 0
-
-            # channel handling
-            channels = [1]
-            if hasattr(ch_cb, "checkedItems"):
-                checked = ch_cb.checkedItems()
-                if checked:
-                    channels = [int(c) for c in checked if c.isdigit()]
-            else:
-                try:
-                    channels = [int(ch_cb.currentText())]
-                except (AttributeError, TypeError, ValueError) as e:
-                    logger.warning(f"Step {r + 1}: couldn't read the channel ({e}); using channel 1.")
-
-            seq.append(
-                {
-                    "pump_did": pump_cb.currentData(),
-                    "channel": channels,
-                    "action": action,
-                    "val1": val1,
-                    "val2": val2,
-                    "val3": val3,
-                }
-            )
-        return seq
-
-    def auto_save_sequence(self):
-        self.config.data["sequence"] = self._get_sequence_data()
-        self.config.save()
-
-    def save_sequence_dialog(self):
-        seqs = list(self.config.data.get("saved_sequences", {}).keys())
-        name, ok = QInputDialog.getItem(
-            self, "Save Sequence", "Sequence Name (select or type new):", seqs, 0, True
-        )
-        if ok and name:
-            if name in self.config.data.get("saved_sequences", {}):
-                reply = QMessageBox.question(
-                    self,
-                    "Overwrite",
-                    f"'{name}' already exists. Overwrite?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.No:
-                    return
-
-            if "saved_sequences" not in self.config.data:
-                self.config.data["saved_sequences"] = {}
-
-            self.config.data["saved_sequences"][name] = self._get_sequence_data()
-            self.config.save()
-            self.refresh_saved_sequences_ui()
-            QMessageBox.information(self, "Saved", f"Sequence '{name}' saved successfully!")
-
-    def load_sequence_dialog(self):
-        seqs = list(self.config.data.get("saved_sequences", {}).keys())
-        if not seqs:
-            QMessageBox.information(self, "No Sequences", "No saved sequences found.")
-            return
-
-        name, ok = QInputDialog.getItem(self, "Load Sequence", "Select Sequence:", seqs, 0, False)
-        if ok and name:
-            self._apply_sequence_data(self.config.data["saved_sequences"][name])
-
-    def _apply_sequence_data(self, seq_data):
-        self.seq_table.blockSignals(True)
-        self.seq_table.setRowCount(0)
-        for s in seq_data:
-            self.add_sequence_step(s["action"])
-            r = self.seq_table.rowCount() - 1
-
-            # Set pump
-            pump_cb = self.seq_table.cellWidget(r, 0)
-            idx = pump_cb.findData(s.get("pump_did"))
-            if idx >= 0:
-                pump_cb.setCurrentIndex(idx)
-
-            # Set channel
-            ch_cb = self.seq_table.cellWidget(r, 1)
-            ch_val = s.get("channel", 1)
-            if hasattr(ch_cb, "setCheckedItems"):
-                if isinstance(ch_val, list):
-                    ch_cb.setCheckedItems([str(c) for c in ch_val])
-                else:
-                    ch_cb.setCheckedItems([str(ch_val)])
-            else:
-                ch_cb.setCurrentText(str(ch_val) if not isinstance(ch_val, list) else str(ch_val[0]))
-
-            # Set values
-            val_widget = self.seq_table.cellWidget(r, 3)
-            if not hasattr(val_widget, "spins"):
-                continue
-
-            spins = val_widget.spins
-            sub_seq_cb = val_widget.sub_seq_cb
-
-            if s["action"] == "Run Sub-Sequence" and sub_seq_cb is not None:
-                sub_seq_cb.setCurrentText(str(s.get("val1", "")))
-            elif spins and len(spins) >= 3:
-                try:
-                    spins[0].setValue(float(s.get("val1", 0.0)))
-                    spins[1].setValue(float(s.get("val2", 0.0)))
-                    spins[2].setValue(float(s.get("val3", 0.0)))
-                except Exception as e:
-                    logger.error(f"Error loading values: {e}")
-        self.seq_table.blockSignals(False)
-        self.auto_save_sequence()
 
 
 ICON_DIR = os.path.join(script_dir, "assets")

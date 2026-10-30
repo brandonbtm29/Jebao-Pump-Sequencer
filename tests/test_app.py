@@ -55,13 +55,6 @@ def test_example_config_loads(tmp_path):
     assert cfg.data["sequence"][0]["action"] == "Dose"
 
 
-def test_checkable_combo_reports_checked_channels(qt_loop):
-    combo = jebao_gui.CheckableComboBox()
-    combo.addItems(["1", "2", "3", "4"])
-    combo.setCheckedItems(["2", "4"])
-    assert combo.checkedItems() == ["2", "4"]
-
-
 def test_window_starts_without_login(window):
     assert window.cloud_token is None
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
@@ -168,19 +161,6 @@ def test_emergency_stop_with_no_pumps_says_so(window, qt_loop, caplog):
         r.name == "JebaoGUI" and r.levelname == "ERROR" and "STOP not sent" in r.getMessage()
         for r in caplog.records
     )
-
-
-def test_unreadable_channel_is_logged_not_hidden(window, caplog):
-    from PyQt6.QtWidgets import QComboBox
-
-    window.add_sequence_step("Dose")
-    bad = QComboBox()
-    bad.addItem("not a channel")
-    window.seq_table.setCellWidget(0, 1, bad)
-    with caplog.at_level("WARNING", logger="JebaoGUI"):
-        steps = window._get_sequence_data()
-    assert steps[0]["channel"] == [1]
-    assert any("couldn't read the channel" in r.getMessage() for r in caplog.records)
 
 
 def test_icon_files_exist_and_load(qt_loop):
@@ -450,6 +430,7 @@ def test_approval_banner_only_while_waiting(window):
     window.refresh_approval_banner()
     assert not window.approval_banner.isHidden()
     assert "CH1, CH3" in window.lbl_approval.text() and "Load sample" in window.lbl_approval.text()
+    assert window.btn_approve_channels[0].text() == "Continue CH1"
     assert not window.btn_approve_channels[0].isHidden() and window.btn_approve_channels[1].isHidden()
     window.approve_all()
     assert window._ch_review_events[1] is None and window.approval_banner.isHidden()
