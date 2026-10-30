@@ -15,10 +15,13 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **Rack tab, your physical setup**: choose how many stacks and pumps per stack, drag pumps into place (or **Auto-arrange A→Z**: JP 2 comes before JP 10), and give each pump and head a name, like "Water → Col 3". Other people can set up their own rigs the same way.
 - **Automatic calibration with a balance**: pick the heads on the rack, put their outlets in one beaker on a Mettler Toledo or Bonvoisin balance, and press Calibrate. The heads run one after another; for each, the app fits a straight line to the mass readings and saves its slope as the flow rate when the line fits well (R² ≥ 0.99) and the flow was steady (the first and second half agree within 2 %; both adjustable). It also shows how late each pump really started and stopped after the app sent ON and OFF. Heads that don't pass are redone, then left for you to Accept or Redo. Every run is saved as a CSV, with the raw readings.
 - **Manual calibration**: or run the selected heads for a set time (60 s by default), type in the volume or mass each one delivered, and save.
-- **Sequences**: build a table of steps (Dose, Staccato, Pause, Pause for user review, Wait for all, Run sub-sequence) across any of your pumps, save it under a name, and reuse it. Saved sequences and the queue are in the Sequencer tab.
-- **Channels run side by side**: each channel works through its own steps at the same time as the others. "Wait for All" lines them up again, and async doses run in the background.
-- **Queue**: line up several saved sequences and they run one after another.
-- **Review steps you can't miss**: when a sequence waits for your review, an orange bar appears across the top with an Approve button for each waiting channel.
+- **Sequences, built as cards**: add steps (Dose, Staccato, Wait (timer), Wait for me, Sync columns, Run sequence), drag them into order, and set each one on the right: pick heads by name from the rack (from any pumps), an amount by volume or time, bursts for Staccato, or run it in the background. Each card says what the step does and how long it takes. Undo, copy and paste, and keyboard shortcuts work as you'd expect.
+- **Before you run**: the app checks for missing heads, old or missing calibrations, offline pumps, rests for the on-time limit and missing sub-sequences, and adds up the liquid you need.
+- **Preview**: the total time (with and without the on-time limit), when it will finish, when you'll be needed, the liquid to prepare, a timeline per channel and a table per head. Nothing is sent to the pumps.
+- **Channels run side by side**: each channel (CH1–CH4) works through the steps on its own heads at the same time as the others. **Sync columns** lines them up again.
+- **Running view**: progress, time left and the finish time; a card per channel with its current step, bursts and mL delivered; pause or skip one channel or all; stop the run. Every run is kept in a run history, including where a stopped run had got to.
+- **Saved sequences and the queue**: search, duplicate, rename, export and import sequences; line several up and they run one after another. Reorder the queue or pause it after the current run.
+- **Wait for me steps you can't miss**: an orange bar appears across the top naming the step, with a Continue button for each waiting channel, and the app can play a sound. Give the step a message, such as a setup change to make there, and it pops up in a window with a Continue button when the run gets there.
 - **Pump guard: no head left running, none running too long**
   - **OFF until it works.** Every OFF is retried until it gets through. An OFF to a pump that has dropped off Wi-Fi only counts once that pump reports the head off.
   - **Checks what the pumps report.** Every 30 s the app reads each pump's own report of its four heads. A head running that the app didn't start (a lost OFF, a pump that reconnected, the phone app, or left over from before the app opened) is turned off and logged.
@@ -37,7 +40,11 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 
 ![Rack tab: two stacks of five pumps, the Not placed list, and the names of one pump's heads](docs/screenshot-rack.png)
 
-![Sequencer tab: saved sequences and the queue on the left, a six-step sequence across three pumps](docs/screenshot-sequencer.png)
+![Sequencer tab, Build view: saved sequences and the queue on the left, the steps as cards in the middle, and the selected Staccato step's heads and amounts on the right](docs/screenshot-sequencer.png)
+
+![Sequencer tab, Preview: total time, finish time, when you're needed, the liquid to prepare, and a timeline per channel with the on-time limit rests](docs/screenshot-sequencer-preview.png)
+
+![Sequencer tab, Running view: one card per channel with its current step, one channel waiting for you, and a step-by-channel progress grid](docs/screenshot-sequencer-running.png)
 
 ## Requirements
 
@@ -77,7 +84,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 2. The app logs in and shows your pumps in the **Manual** tab, using the names you gave them in the phone app. At first they are all in one stack.
 3. Open the **Rack** tab and arrange them as they sit on your bench: set the number of stacks and pumps per stack, then drag each pump into its place (or press **Auto-arrange A→Z**). Click a pump to name it and its heads.
 4. Calibrate each head you plan to use (**Calibration** tab: **Uncalibrated** selects the ones that still need it). Until you do, the app assumes 1 mL/min and marks the head "not calibrated", so volume doses would be wrong.
-5. In **Manual**, select a head, try a small dose, then build a sequence in **Sequencer**.
+5. In **Manual**, select a head, try a small dose, then build a sequence in **Sequencer**: add steps with the buttons under the list, pick the heads on the right, check **Preview**, then press **▶ Run now**.
 
 Coming from 1.x? Your login, calibrations, pump order and saved sequences carry over. The pumps start in one stack in your old order until you arrange them in the Rack tab.
 

@@ -4,6 +4,56 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-30
+
+A new Sequencer tab. Your saved sequences carry over and run as before.
+
+### Added
+- **Build view.**
+  - **Steps as cards.** Each card shows the step's type, a plain description ("Dose 6 mL · Condition", "EtOH → Col 1–4 (JP 1 · CH1–4)") and how long it will take. Flags show steps that run in the background, rest for the on-time limit or have a problem.
+  - **Easier editing.** Drag cards to reorder them, and select several to copy, paste, duplicate or delete. Undo and Redo, plus keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z, Ctrl+S, Ctrl+D, Ctrl+C, Ctrl+V, Alt+↑/↓, Delete).
+  - **Step settings on the right.** Pick the step type and give it a label. Pick heads by name from the rack, from any pumps in one step; dashed means not calibrated and grey means offline. Set an amount by volume or by time (min : s), the bursts and waits for Staccato, and the channels for timers, waits and syncs. Every step shows an estimate.
+  - **"Before you run" checks.** Heads not picked, missing or old calibrations (over 30 days), offline pumps, rests for the on-time limit, missing sub-sequences, and the liquid needed.
+  - **Saved sequences.** Search them, and see each one's steps, time and last run. New, Duplicate, Rename (sequences that run it keep working), Delete, Export and Import.
+  - **Your work is kept.** The sequence you're editing is saved as you go, with an "Unsaved changes" marker until you press Save.
+- **Preview.**
+  - The total time with and without the on-time limit, and the finish time for any start time.
+  - When you'll be needed (the first Wait for me step), and the liquid to prepare.
+  - A timeline per channel showing pumping, bursts, rests, waits for you, timers and sync waits.
+  - A table per head: rate, volume, pumping time, resting time and checks.
+  - Nothing is sent to the pumps.
+- **Running view.**
+  - The run's state, elapsed time, time left, finish time and progress, with Pause all / Resume all, Skip step and Stop run.
+  - A card per channel: its current step, burst count, mL delivered so far, resting countdown and next step, with its own Pause, Skip and Continue.
+  - A step × channel progress grid, what's queued next, and recent runs.
+- **Skip a step** on one channel or all: its heads turn off and the channel goes on with the next step.
+- **Pause one channel** (or all): its heads turn off and its timers stop until you resume. Waits for you and syncs aren't affected.
+- **Run history.** Every run is saved with its times, how it ended, where a stopped run had got to and what it delivered, in `runs-<computer>.jsonl` in the log folder.
+- **Queue controls.** Move queued runs up and down or remove them, and tick "Pause the queue after this run" to hold the next one. Stop run pauses the queue. A run that fails or is stopped pauses it too, so the next run doesn't start on its own. **Run now** starts a sequence next, even when the queue is paused; the rest stay paused.
+- **Messages on Wait for me steps.** Write what to do at that step, such as a manual setup change ("Move the sample lines to the collection tubes"). When a channel gets there:
+  - The message pops up in a window that stays on top, with **Continue** for every channel waiting at that step, and **Not yet** to close it while the run keeps waiting.
+  - It's also shown in the orange bar, on the channel's card in the Running view, on the step's card, in the Preview and in the System Log.
+- **Wait for me** can play a sound, and the orange bar now names the step ("Waiting for you: CH2 … (step 4: Check no column ran dry)"), with **Continue** buttons.
+
+### Changed
+- **Step types renamed.**
+  - Pause → **Wait (timer)**.
+  - Pause (User Review) → **Wait for me**.
+  - Wait for All → **Sync columns**.
+  - Run Sub-Sequence → **Run sequence**.
+  - Dose (Async) and Staccato (Async) → **Dose** or **Staccato** with **Run in the background** ticked.
+- A step can use heads on several pumps. Each channel runs its own heads, side by side, as before.
+- A step with a problem (no heads, 0 mL, a 0 mL burst, more than 5,000 bursts, or no flow rate for a volume) now stops the run with an error instead of pumping something else. You're asked before a sequence with problems starts.
+- A step whose head is still busy (a background step or a manual dose on it) waits for it to be free.
+- A sync inside a sub-sequence works now. Before, it could wait for ever.
+- Steps that version 2.6 and older can't run exactly (more than one pump, or a dose by time) are saved so that an older copy of the app sharing the same settings stops at them and waits for you, instead of pumping the wrong head. Update every computer that shares settings.
+
+### Fixed
+- **Skip, Stop or Emergency Stop just as a head was turned on could leave it running.** The ON could reach the pump after the OFF. A cancelled command now waits for its request to finish before the OFF is sent, and a cancelled ON always ends with the head turned off.
+- **An OFF cancelled before it was sent** (for example by pressing Stop twice) is now still sent.
+- **The pump guard could turn a head back on just after its dose ended.** The guard re-sends ON when a pump reports a head OFF mid-dose, and that ON could land after the dose's final OFF. It now checks, just before sending, that the dose still wants the head on.
+- **"Sequence completed successfully" was logged after an Emergency Stop.** The log now says how each run ended.
+
 ## [2.6.0] - 2026-10-28
 
 ### Added
@@ -215,7 +265,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.3.1...v2.4.0
