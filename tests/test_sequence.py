@@ -307,3 +307,17 @@ def test_long_staccato_plans_quickly():
     too_many = {**many, "burst": 0.01}
     p = sq.plan([too_many], ctx(rates={"A": 2.4}, limit=lambda key: limit))
     assert any("too many" in c.text for c in p.errors) and 0 in p.unknown
+
+
+def test_wait_for_me_keeps_its_message():
+    step = sq.normalize(
+        {**sq.new_step("review", lanes=[1, 2]), "message": "  Move the lines to the tubes.\nThen continue.  "}
+    )
+    assert step["message"] == "Move the lines to the tubes.\nThen continue."
+    assert sq.where_text(step, ctx()) == "CH1–2 stop here · “Move the lines to the tubes.”"
+    assert sq.normalize(sq.to_saved(step))["message"] == step["message"]
+    assert sq.to_saved(step)["action"] == "Pause (User Review)"  # older copies still stop there
+    assert sq.normalize({**sq.new_step("wait"), "message": "x"})["message"] == ""  # only on Wait for me
+    long = sq.normalize({**sq.new_step("review"), "message": "x" * 5000})
+    assert len(long["message"]) == sq.MAX_MESSAGE
+    assert sq.normalize({**sq.new_step("review"), "message": {"bad": 1}})["message"] == ""

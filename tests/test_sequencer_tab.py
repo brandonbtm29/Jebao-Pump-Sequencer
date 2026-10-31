@@ -253,3 +253,18 @@ def test_odd_saved_data_doesnt_break_the_tab(window, tmp_path):
     path.write_text(json.dumps({"name": "Odd", "steps": [odd]}))
     assert t.import_file(str(path)) == "Odd"
     t.refresh_library()
+
+
+def test_wait_for_me_message_is_edited_in_the_settings(tab):
+    from PyQt6.QtWidgets import QPlainTextEdit
+
+    tab.add_step("review")
+    editor = tab.insp.findChild(QPlainTextEdit)
+    assert editor is not None
+    editor.setPlainText("Swap the sample line to tube 2.")
+    assert tab.steps[0]["message"] == "Swap the sample line to tube 2."
+    tab._replan()
+    card = tab.list.item(0).data(Qt.ItemDataRole.UserRole)
+    assert "Swap the sample line to tube 2." in card["where"]
+    tab.show_page(1)
+    assert "Swap the sample line" in tab.card_needed.note.text()

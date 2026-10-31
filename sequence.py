@@ -4,14 +4,15 @@ A sequence is a list of steps. Each step is a dict like::
 
     {"kind": "dose", "heads": [["did", 1], ["did", 2]], "by": "volume", "volume": 6.0,
      "seconds": 0.0, "burst": 0.0, "gap": 0.0, "background": False, "label": "Condition",
-     "lanes": [1, 2, 3, 4], "name": "", "sound": True}
+     "lanes": [1, 2, 3, 4], "name": "", "sound": True, "message": ""}
 
 Kinds (shown with the names in ``LABELS``):
 
 - ``dose``: pump ``volume`` mL (``by`` "volume") or for ``seconds`` (``by`` "time") on each head.
 - ``staccato``: pump ``volume`` mL in bursts of ``burst`` mL with ``gap`` s between them.
 - ``wait``: a timer of ``seconds``.
-- ``review``: wait until someone presses Continue ("Wait for me").
+- ``review``: wait until someone presses Continue ("Wait for me"), showing ``message``
+  (what to do there, e.g. a setup change) in a pop-up and the orange bar.
 - ``sync``: the lanes wait for each other, and for what they started in the background.
 - ``sequence``: run the saved sequence ``name``.
 
@@ -85,6 +86,14 @@ def _num(value, default=0.0, high=MAX_ML):
     return min(max(0.0, v), high)
 
 
+MAX_MESSAGE = 2000  # characters in a Wait for me message
+
+
+def _text(value):
+    """A message from saved data: text, trimmed, at most MAX_MESSAGE characters."""
+    return str(value).strip()[:MAX_MESSAGE] if isinstance(value, (str, int, float)) else ""
+
+
 def _channel(value):
     """1–4 from 1, "1" or 1.0, else None."""
     try:
@@ -133,6 +142,7 @@ def new_step(kind, heads=None, lanes=None):
         "label": "",
         "name": "",
         "sound": True,
+        "message": "",
     }
     if kind == "staccato":
         step["volume"] = 10.0
@@ -158,6 +168,7 @@ def normalize(step):
                 "label": str(step.get("label") or "").strip(),
                 "name": str(step.get("name") or ""),
                 "sound": bool(step.get("sound", True)),
+                "message": _text(step.get("message")) if step["kind"] == "review" else "",
             }
         )
         return out
@@ -492,6 +503,9 @@ def where_text(step, ctx):
         return heads_text(step, ctx)
     lanes = lanes_text(step["lanes"])
     if k == "review":
+        first = step.get("message", "").splitlines()[0] if step.get("message") else ""
+        if first:
+            return f"{lanes} stop here · “{first}”"
         return f"{lanes} stop here until you continue"
     if k == "sync":
         return f"{lanes} wait for each other and for their background steps"
