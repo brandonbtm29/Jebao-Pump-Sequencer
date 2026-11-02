@@ -22,6 +22,7 @@ Jebao dosing pumps are cheap and reliable, but their phone app is built for aqua
 - **Running view**: progress, time left and the finish time; a card per channel with its current step, bursts and mL delivered; pause or skip one channel or all; stop the run. Every run is kept in a run history, including where a stopped run had got to.
 - **Saved sequences and the queue**: search, duplicate, rename, export and import sequences; line several up and they run one after another. Reorder the queue or pause it after the current run.
 - **Wait for me steps you can't miss**: an orange bar appears across the top naming the step, with a Continue button for each waiting channel, and the app can play a sound. Give the step a message, such as a setup change to make there, and it pops up in a window with a Continue button when the run gets there.
+- **Discord notifications**: the app can post to a channel on your Discord server when a channel waits for you (with the step's message), when a run fails, stops or finishes, when a head can't be confirmed OFF, when a pump goes offline mid-run and when a head rests. Choose which ones ping your phone. Discord only receives messages; it can't control the pumps. See [Discord notifications](#discord-notifications).
 - **Pump guard: no head left running, none running too long**
   - **OFF until it works.** Every OFF is retried until it gets through. An OFF to a pump that has dropped off Wi-Fi only counts once that pump reports the head off.
   - **Checks what the pumps report.** Every 30 s the app reads each pump's own report of its four heads. A head running that the app didn't start (a lost OFF, a pump that reconnected, the phone app, or left over from before the app opened) is turned off and logged.
@@ -100,14 +101,23 @@ Each time it starts, the app asks GitHub for the latest release (a normal web re
 
 This needs a copy made with `git clone` and Git installed. A ZIP download can't update itself; the app links to the release page instead. You can also update by hand with `git pull` and `pip install -e .`.
 
+## Discord notifications
+
+1. In Discord, make a channel for the lab (a private one is best), then open **Server Settings → Integrations → Webhooks → New Webhook**. Pick that channel and press **Copy Webhook URL**.
+2. In the app, open **Settings → Discord → Notifications…**, tick **Send notifications to Discord** and paste the URL.
+3. To be pinged on your phone, paste your Discord user ID under **Ping**. To find it, turn on **User Settings → Advanced → Developer Mode** in Discord, then right-click your name and choose **Copy User ID**.
+4. Choose which events to send and which ones ping you, then press **Send a test message**.
+
+Anyone who has the webhook URL can post in that channel, so treat it like a password. If it leaks, delete the webhook in Discord and make a new one. The app keeps it in `secrets.json`.
+
 ## Configuration
 
 The app keeps two settings files:
 
 | File | What's in it | Example |
 |---|---|---|
-| `secrets.json` | Your Jebao login | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, whether to check for updates at start (`check_updates_on_start`), the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit (`guard`) and per-head limits (`pumps.<id>.limits`), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `secrets.json` | Your Jebao login and, if you use it, the Discord webhook URL | [`examples/secrets.example.json`](examples/secrets.example.json) |
+| `jebao_config.json` | Theme, whether to check for updates at start (`check_updates_on_start`), the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit (`guard`) and per-head limits (`pumps.<id>.limits`), Discord notifications (`discord`: on or off, events, pings, the ID to ping), Manual tab choices (tile size, last amount), the current sequence and saved sequences | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 

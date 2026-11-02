@@ -4,6 +4,22 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-11-02
+
+### Added
+- **Discord notifications** (Settings → Discord → Notifications…). The app can post to a channel on your Discord server, so you know what's happening when you're away from the computer. It posts when:
+  - a channel reaches a Wait for me step, with the step's message;
+  - a run fails, is stopped or finishes (with the mL each head delivered and what's next in the queue);
+  - a head still can't be confirmed OFF after a minute, and again when all are clear;
+  - a pump goes offline while one of its heads is on or a run is using it, and when it's back;
+  - a head rests for its on-time limit.
+- **Pings:** each event can ping you (or a role) on your phone. By default, Wait for me, failures, heads not confirmed OFF and pumps going offline ping you; the rest are posted quietly. Only the person or role you set can be pinged, whatever a step's message says.
+- **Send a test message** checks the webhook before you rely on it.
+- Discord only receives messages. It can't control the pumps.
+
+### Security
+- The webhook URL is kept in `secrets.json` with your Jebao login. It never appears in the System Log or in Copy Diagnostics. Pump IDs and MAC addresses are never sent to Discord.
+
 ## [2.9.0] - 2026-11-02
 
 ### Added
@@ -292,7 +308,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...v2.7.0
