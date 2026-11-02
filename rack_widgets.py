@@ -12,6 +12,8 @@ and the motor runs. The host provides:
 - ``current_running_sequence`` and ``sequence_queue``
 """
 
+import html
+
 from PyQt6.QtCore import QMimeData, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import (
@@ -232,7 +234,11 @@ class PumpCard(QFrame):
         online = pump_online(host, self.did)
         self.lbl.setText(host.get_device_name(self.did))
         self.dot.setStyleSheet(f"color: {COLORS['running'] if online else COLORS['offline']};")
-        self.note.setText("" if online else "offline: check its Wi-Fi")
+        cloud = getattr(host, "cloud_note", lambda _did: "")(self.did)
+        notes = [cloud] if cloud else []
+        if not online:
+            notes.append("offline: check its Wi-Fi")
+        self.note.setText(" · ".join(notes))
         pump = host.config.get_pump(self.did)
         status_for = self.tab.status_for
         for tile in self.tiles:
@@ -629,7 +635,16 @@ class SlotWidget(QFrame):
         if did:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             self.lbl = QLabel("⠿  " + tab.host.get_device_name(did))
-            lay.addWidget(self.lbl, 1)
+            cloud = getattr(tab.host, "cloud_note", lambda _did: "")(did)
+            names = QVBoxLayout()
+            names.setSpacing(0)
+            names.addWidget(self.lbl)
+            if cloud:
+                sub = QLabel(cloud)
+                sub.setStyleSheet("color: grey; font-size: 11px;")
+                names.addWidget(sub)
+            self.setToolTip(cloud or "")
+            lay.addLayout(names, 1)
             btn = QPushButton("×")
             btn.setFixedWidth(28)
             btn.setToolTip("Take this pump out of the rack")
@@ -843,9 +858,12 @@ class RackTab(QWidget):
             tray.sort(key=lambda d: rack.natural_key(self.host.get_device_name(d)))
         self.tray.clear()
         for did in tray:
-            item = QListWidgetItem("⠿  " + self.host.get_device_name(did))
+            cloud = getattr(self.host, "cloud_note", lambda _did: "")(did)
+            item = QListWidgetItem(
+                "⠿  " + self.host.get_device_name(did) + (f"\n     {cloud}" if cloud else "")
+            )
             item.setData(Qt.ItemDataRole.UserRole, did)
-            item.setToolTip("Drag into a slot")
+            item.setToolTip("Drag into a slot" + (f" ({cloud})" if cloud else ""))
             self.tray.addItem(item)
             if did == self.picked:
                 item.setSelected(True)
@@ -971,10 +989,22 @@ class RackTab(QWidget):
                 e.clear()
             return
         cfg = self.host.config
-        cloud = next(
-            (d.get("dev_alias") or d.get("mac") for d in self.host.cloud_devices if d.get("did") == did), did
+        device = next((d for d in self.host.cloud_devices if d.get("did") == did), {})
+        alias = str(device.get("dev_alias") or "").strip()
+        cloud = alias or device.get("mac") or did
+        about = [f"Name in the Jebao app: {html.escape(alias)}" if alias else "No name in the Jebao app"]
+        if device.get("product_name"):
+            about.append(html.escape(str(device["product_name"])))
+        if device.get("mac"):
+            about.append(f"MAC {html.escape(str(device['mac']))}")
+        self.lbl_current.setText(
+            f"<b>{html.escape(self.host.get_device_name(did))}</b><br>"
+            f"<span style='color: grey;'>{' · '.join(about)}</span>"
         )
-        self.lbl_current.setText(f"<b>{self.host.get_device_name(did)}</b>")
+        self.lbl_current.setToolTip(
+            "The Jebao app name is the pump's own name on the Jebao cloud (rename it in the Jebao "
+            "Aqua phone app). The pump name below is this app's name for it."
+        )
         self.edit_pump.setPlaceholderText(cloud)
         self.edit_pump.setText(cfg.display_name(did))
         for ch, e in enumerate(self.edit_heads, start=1):

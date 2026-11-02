@@ -243,3 +243,28 @@ def test_names_typed_for_one_pump_stay_with_it(bench):
     assert window.config.display_name("D2") == "" and tab.edit_pump.text() == ""
     tab._save_names()  # leaving D2's empty box changes nothing
     assert window.config.display_name("D2") == ""
+
+
+def test_jebao_app_name_is_shown_next_to_your_own(bench):
+    window, _ = bench
+    clear_names(window)
+    window.config.get_pump("D1")["display_name"] = "EtOH pump"
+    next(d for d in window.cloud_devices if d["did"] == "D1").update(
+        mac="AABBCCDDEEFF", product_name="Doser 2.4"
+    )
+    window.refresh_pumps()
+    assert window.cloud_name("D1") == "JP 1" and window.cloud_note("D1") == "Jebao app: JP 1"
+    assert window.cloud_note("D2") == ""  # no own name: the Jebao name is the name
+    card = next(c for c in window.manual_tab.cards if c.did == "D1")
+    card.refresh()
+    assert "Jebao app: JP 1" in card.note.text()
+    tab = window.rack_tab
+    slot = next(s for s in tab.slots if s.did == "D1")
+    assert slot.toolTip() == "Jebao app: JP 1"
+    tab.slot_clicked(slot)
+    text = tab.lbl_current.text()
+    assert "Name in the Jebao app: JP 1" in text and "Doser 2.4" in text and "AABBCCDDEEFF" in text
+    from network_report import NetworkDialog
+
+    rows = NetworkDialog(window, window).rows()
+    assert any(r["name"] == "EtOH pump (Jebao app: JP 1)" for r in rows)

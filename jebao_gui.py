@@ -1739,6 +1739,20 @@ class JebaoPumpGUI(QMainWindow):
                 return d.get("dev_alias") or d.get("mac")
         return did
 
+    def cloud_name(self, did):
+        """The pump's own name on the Jebao cloud (as set in the Jebao Aqua phone app), "" if none."""
+        for d in self.cloud_devices:
+            if d.get("did") == did:
+                return str(d.get("dev_alias") or "").strip()
+        return ""
+
+    def cloud_note(self, did):
+        """'Jebao app: Doser 3' when the pump has a different name in this app, else ""."""
+        alias = self.cloud_name(did)
+        if alias and alias != self.get_device_name(did):
+            return f"Jebao app: {alias}"
+        return ""
+
     def set_status_color(self, label, connected):
         if connected:
             label.setStyleSheet("color: #28A745; font-weight: bold; font-size: 14px;")

@@ -1832,8 +1832,10 @@ class SequencerTab(QWidget):
                 pump.setFixedWidth(width)
                 pump.setText(pump.fontMetrics().elidedText(pump_name, Qt.TextElideMode.ElideRight, width - 8))
                 pump.setStyleSheet("text-align: left;" + (" color: #7D828C;" if online is False else ""))
+                cloud = getattr(host, "cloud_note", lambda _did: "")(did)
                 pump.setToolTip(
                     f"{pump_name}"
+                    + (f" ({cloud})" if cloud else "")
                     + (" (offline right now)" if online is False else "")
                     + ": click to pick or clear all four heads."
                 )

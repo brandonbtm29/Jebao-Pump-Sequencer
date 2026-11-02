@@ -145,6 +145,9 @@ class NetworkDialog(QDialog):
             did = d.get("did")
             s = log.summary(did)
             s["name"] = self.host.get_device_name(did)
+            note = getattr(self.host, "cloud_note", lambda _did: "")(did)
+            if note:
+                s["name"] += f" ({note})"
             s["mac"] = s["mac"] or d.get("mac", "")
             if s["online"] is None:
                 s["online"] = bool(d.get("is_online", False))
