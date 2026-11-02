@@ -147,7 +147,7 @@ def test_emergency_stop_reports_pumps_it_could_not_stop(window, qt_loop, monkeyp
     with caplog.at_level("INFO", logger="JebaoGUI"):
         loop.run_until_complete(window._async_stop_all())
     errors = [r.getMessage() for r in caplog.records if r.name == "JebaoGUI" and r.levelname == "ERROR"]
-    assert len(errors) == 1
+    assert len(errors) == 1, errors
     assert "2 of 3" in errors[0] and "JP 2" in errors[0] and "JP 3" in errors[0]
     assert "JP 1" not in errors[0]
 

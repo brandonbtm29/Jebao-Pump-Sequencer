@@ -12,7 +12,7 @@ and the motor runs. The host provides:
 - ``current_running_sequence`` and ``sequence_queue``
 """
 
-from PyQt6.QtCore import QMimeData, Qt, pyqtSignal
+from PyQt6.QtCore import QMimeData, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -876,7 +876,16 @@ class RackTab(QWidget):
         self._load_names()
 
     def _apply(self, layout):
-        self.host.save_rack_layout(layout)  # the host saves and refreshes both tabs
+        """Save a changed layout. The tabs are rebuilt a moment later, once the click, drop
+        or key press that changed it has finished: rebuilding deletes the slots, buttons and
+        name boxes, and deleting the very widget Qt is still handling crashes the app."""
+        layout = rack.normalize(layout)
+        self.host.config.data["rack"] = layout
+        self.host.config.save()
+        self._later(lambda: self.host.save_rack_layout(layout))
+
+    def _later(self, fn):
+        QTimer.singleShot(0, fn)
 
     # --- editing the layout ---
 
@@ -917,6 +926,7 @@ class RackTab(QWidget):
 
     def _tray_clicked(self, item):
         did = item.data(Qt.ItemDataRole.UserRole)
+        self._save_names()  # names typed for the previous pump, before switching
         self.picked = None if self.picked == did else did
         self.current = did
         self._load_names()
@@ -928,6 +938,7 @@ class RackTab(QWidget):
             if self.picked:
                 self.place(self.picked, slot.stack, slot.index)
             return
+        self._save_names()  # names typed for the previous pump, before switching
         self.current = slot.did
         self.picked = None
         for s in self.slots:
@@ -952,6 +963,7 @@ class RackTab(QWidget):
 
     def _load_names(self):
         did = self.current
+        self._names_for = did  # the boxes now hold this pump's names
         self._set_names_enabled(bool(did))
         if not did:
             self.lbl_current.setText("Click a pump to name it and its heads.")
@@ -977,8 +989,8 @@ class RackTab(QWidget):
             self._loading = False
 
     def _save_names(self):
-        did = self.current
-        if not did:
+        did = getattr(self, "_names_for", None)  # the pump whose names are in the boxes
+        if not did or did not in self.dids():
             return
         cfg = self.host.config
         changed = False
@@ -992,4 +1004,4 @@ class RackTab(QWidget):
                 changed = True
         if changed:
             cfg.save()
-            self.host.names_changed()
+            self._later(self.host.names_changed)  # not now: see _apply

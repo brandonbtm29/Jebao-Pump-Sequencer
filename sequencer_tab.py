@@ -474,7 +474,7 @@ class StepList(QListWidget):
 
     def dropEvent(self, event):
         super().dropEvent(event)
-        self.reordered.emit()
+        QTimer.singleShot(0, self.reordered.emit)  # the cards are rebuilt after the drop has finished
 
 
 # --- preview timeline --------------------------------------------------------------------
@@ -690,6 +690,7 @@ class ReviewPopup(QDialog):
         self.setWindowTitle(f"Waiting for you · step {step_number}")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumWidth(460)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 14)
@@ -1149,7 +1150,7 @@ class SequencerTab(QWidget):
         self.library.setItemDelegate(LibraryDelegate(self.library))
         self.library.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.library.setMouseTracking(True)
-        self.library.itemClicked.connect(lambda item: self.open_sequence(item.data(Qt.ItemDataRole.UserRole)))
+        self.library.itemClicked.connect(self._library_clicked)
         self.library.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.library.customContextMenuRequested.connect(self._library_menu)
         lay.addWidget(self.library, 3)
@@ -2144,6 +2145,11 @@ class SequencerTab(QWidget):
             self.library.addItem(item)
         if hasattr(self, "unsaved"):
             self._update_bar()
+
+    def _library_clicked(self, item):
+        # Opened a moment later: opening refills this list, which mustn't happen inside its own click.
+        name = item.data(Qt.ItemDataRole.UserRole)
+        QTimer.singleShot(0, lambda: self.open_sequence(name))
 
     def _library_selected(self):
         item = self.library.currentItem()

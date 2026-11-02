@@ -870,7 +870,11 @@ class JebaoPumpGUI(QMainWindow):
         if self.secrets.data.get("username") and self.secrets.data.get("password"):
             QTimer.singleShot(100, lambda: self._start_task(self.login_and_fetch))
 
-        QTimer.singleShot(200, lambda: self._start_task(self._queue_worker))
+        self._queue_task = None
+        QTimer.singleShot(200, self._start_queue)
+
+    def _start_queue(self):
+        self._queue_task = self._start_task(self._queue_worker)
 
     def _start_task(self, coro_fn):
         """Start an async job on the app's event loop (skipped when no loop is running, as in tests)."""
@@ -1237,6 +1241,8 @@ class JebaoPumpGUI(QMainWindow):
             if hasattr(self, "calibration_tab") and self.calibration_tab.bal is not None:
                 self.calibration_tab.bal.close()
             self.remember_window_state()
+            if self._queue_task is not None and not self._queue_task.done():
+                self._queue_task.cancel()  # nothing is running or queued (or it was all stopped)
             event.accept()
             return
         event.ignore()
