@@ -4,6 +4,21 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-11-02
+
+### Fixed
+- **Renaming pumps in the Rack tab could crash the app.** Typing a pump or head name and then clicking a stack name or a pump's × button closed the app at once. This had been possible since 2.0.
+- **A name typed for one pump was lost** if you clicked the next pump before leaving the name box. It's now saved to the pump you typed it for.
+
+### Added
+- **Each pump's name in the Jebao app** (its own name on the Jebao cloud, set in the Jebao Aqua phone app) shows next to the name you gave it:
+  - under each pump in the Rack tab and on the Manual tab's pump cards;
+  - in the Rack tab's Names panel, with the pump model and MAC address;
+  - in the connection report and in the Sequencer's head picker.
+
+### Changed
+- **The on-time limit choices in the Rack tab say what Default means**: "Default (30 min)" or "Default (off)". A note under them gives the window, and says that a head's own limit applies even when the default is turned off in Settings → Pump safety.
+
 ## [2.7.0] - 2026-10-30
 
 A new Sequencer tab. Your saved sequences carry over and run as before.
@@ -265,7 +280,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.4.0...v2.5.0
