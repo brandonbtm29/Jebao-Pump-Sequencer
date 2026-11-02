@@ -26,6 +26,7 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 import crash_log
 import diagnostics
+import discord_notify
 import eventlog
 import netwatch
 import pumpguard
@@ -36,6 +37,7 @@ import shortcut
 import single_instance
 import updater
 from calibration_tab import CalibrationTab
+from discord_dialog import DiscordDialog
 from network_report import NetworkDialog
 from rack_widgets import ManualTab, RackTab
 from sequencer_tab import ReviewPopup, SequencerTab
@@ -180,6 +182,8 @@ DOMAIN = "usapi.gizwits.com"
 # Seconds to wait for the cloud before giving up on a request, so a stalled
 # connection can't hold up a dose or the emergency stop indefinitely.
 REQUEST_TIMEOUT = 10
+# Seconds a head waits in the red bar (OFF not confirmed) before Discord is told
+GUARD_NOTIFY_S = 60
 
 
 class SecretsManager:
@@ -707,6 +711,12 @@ class SettingsDialog(QDialog):
         btn_network.setToolTip("When each pump dropped off Wi-Fi and came back, and router tips.")
         btn_network.clicked.connect(lambda: getattr(parent, "open_network_report", lambda: None)())
         layout.addRow("Wi-Fi:", btn_network)
+        btn_discord = QPushButton("Notifications…")
+        btn_discord.setToolTip("Post to a Discord channel when a channel waits for you or a run ends.")
+        btn_discord.clicked.connect(
+            lambda: getattr(parent, "open_discord_settings", lambda _d=None: None)(self)
+        )
+        layout.addRow("Discord:", btn_discord)
 
         layout.addRow(QLabel("<b>Pump safety</b>"))
         guard = self.config.data.get("guard", {})
@@ -860,6 +870,12 @@ class JebaoPumpGUI(QMainWindow):
         self._groups_key = None
         self._groups = {}
         self._run_lane_of = {}  # (did, ch) -> lane, fixed when a run starts
+
+        # Discord notifications (discord_notify.py): sent from their own thread
+        self.discord = discord_notify.Notifier()
+        self._guard_seen = {}  # head -> when it first showed in the red bar
+        self._guard_told = set()  # heads Discord has been told about
+        self._offline_told = set()  # pumps Discord was told went offline while in use
 
         self.setup_ui()
         self._build_status_bar()
@@ -1030,6 +1046,11 @@ class JebaoPumpGUI(QMainWindow):
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
         self.update_clock()
+
+        # The red bar (and Discord) also follow the guard between pump checks
+        self.guard_timer = QTimer(self)
+        self.guard_timer.timeout.connect(self.refresh_guard_banner)
+        self.guard_timer.start(5000)
 
     def set_log_collapsed(self, collapsed):
         """Shrink the System Log to its header (showing the latest line), or open it again."""
@@ -1237,6 +1258,7 @@ class JebaoPumpGUI(QMainWindow):
             self.remember_window_state()
             if self._queue_task is not None and not self._queue_task.done():
                 self._queue_task.cancel()  # nothing is running or queued (or it was all stopped)
+            self.discord.close(timeout=2.0)  # what's left to tell Discord, briefly
             event.accept()
             return
         event.ignore()
@@ -1318,11 +1340,14 @@ class JebaoPumpGUI(QMainWindow):
             extra["Balance"] = "not connected"
         else:
             extra["Balance"] = f"connected ({cal._bal_name()})" + (f", {bal.error}" if bal.error else "")
+        extra["Discord"] = self._discord_status()
         return extra
 
     def private_values(self):
         """What Copy Diagnostics must never show: the Jebao login, the cloud token, pump IDs and MACs."""
         values = [self.secrets.data.get("username"), self.secrets.data.get("password"), self.cloud_token]
+        webhook = self.secrets.data.get("discord_webhook")
+        values += [webhook, discord_notify.webhook_token(webhook)]
         for d in self.cloud_devices:
             values += [d.get("did"), d.get("mac"), d.get("passcode"), d.get("product_key")]
         values += list(self.config.data.get("pumps") or {})
@@ -1498,6 +1523,7 @@ class JebaoPumpGUI(QMainWindow):
                 logger.warning(f"{p.name} went offline (lost its Wi-Fi or power).")
             else:
                 logger.info(f"{p.name} is back online after {netwatch.fmt_duration(outage)}.")
+            self._tell_discord(self._notify_online, p, event, outage)
         self._update_pump_count()
 
     async def _watch_pumps(self):
@@ -1544,6 +1570,191 @@ class JebaoPumpGUI(QMainWindow):
 
     def open_network_report(self):
         NetworkDialog(self, self).exec()
+
+    # --- Discord notifications (discord_notify.py, Settings → Discord) -------------------------
+
+    def open_discord_settings(self, parent=None):
+        DiscordDialog(self, parent or self).exec()
+
+    def _discord_status(self):
+        """For Copy Diagnostics: on or off, and how sending went (no URL or IDs)."""
+        s = discord_notify.settings(self.config.data.get("discord"))
+        if not s["enabled"]:
+            return "off"
+        url = self.secrets.data.get("discord_webhook", "")
+        if discord_notify.check_url(url):
+            return "on, but the webhook URL is missing or wrong"
+        events = sum(s["events"].values())
+        text = f"on ({events} of {len(s['events'])} events), {self.discord.sent} sent"
+        if self.discord.failed:
+            text += f", {self.discord.failed} not sent (last: {self.discord.last_problem})"
+        return text
+
+    def _tell_discord(self, fn, *args, **kwargs):
+        """Run a notification hook. A bug in one must never get in the way of a run."""
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"Discord notification skipped ({type(e).__name__}: {discord_notify.scrub(e)}).")
+
+    def discord_footer(self):
+        return f"{eventlog.computer_name()} · Jebao Pump Sequencer {__version__}"
+
+    def _discord_text(self, text):
+        """Pump IDs and MAC addresses never go to Discord (a pump with no name shows its ID)."""
+        text = str(text or "")
+        hidden = [d.get("did") for d in self.cloud_devices] + [d.get("mac") for d in self.cloud_devices]
+        hidden += list(self.config.data.get("pumps") or {})
+        for value in sorted({str(v) for v in hidden if v and len(str(v)) >= 4}, key=len, reverse=True):
+            text = text.replace(value, "a pump")
+        return _MAC_ADDRESS.sub("a pump", text)
+
+    def notify(self, event, title, body="", fields=(), items=(), group="", ping=None):
+        """Tell Discord about ``event`` (a key of ``discord_notify.EVENTS``), if it's switched on
+        in Settings → Discord. Returns True if it was queued. Never waits for Discord."""
+        s = discord_notify.settings(self.config.data.get("discord"))
+        url = self.secrets.data.get("discord_webhook", "")
+        if not s["enabled"] or not s["events"].get(event) or not url:
+            return False
+        clean = self._discord_text
+        note = discord_notify.Note(
+            event,
+            clean(title),
+            body=clean(body),
+            fields=[(clean(name), clean(value)) for name, value in fields],
+            items=[clean(i) for i in items],
+            group=group,
+            ping=s["pings"].get(event, False) if ping is None else ping,
+        )
+        return self.discord.send(url, note, s["mention_id"], s["mention_kind"], self.discord_footer())
+
+    def discord_test(self, url, values, on_done=None):
+        """Settings → Discord → Send a test message, with the settings in the dialog."""
+        s = discord_notify.settings(values)
+        note = discord_notify.Note(
+            "test",
+            "Test message from the Jebao Pump Sequencer",
+            body="Notifications from this computer will look like this.",
+            fields=[("Computer", eventlog.computer_name())],
+            ping=bool(s["mention_id"]),
+        )
+        return self.discord.send(
+            url, note, s["mention_id"], s["mention_kind"], self.discord_footer(), on_done
+        )
+
+    def _notify_review(self, ch, item, message):
+        name = self.current_running_sequence or (self.seq_run.name if self.seq_run else "")
+        self.notify(
+            "review",
+            "Waiting for you: {items}",
+            body=message,
+            fields=[
+                ("Sequence", name),
+                ("Step", f"{item.top + 1}: {sequence.title(item.step)}"),
+                ("To go on", "Press Continue in the app"),
+            ],
+            items=[f"CH{ch}"],
+            group=f"review:{id(self.seq_run)}:{item.path}",
+        )
+
+    def _queue_text(self, outcome):
+        waiting = len(self.sequence_queue)
+        if not waiting:
+            return ""
+        more = f"{waiting} more waiting"
+        if outcome != "done" or self.queue_paused:
+            return f"Paused, {more}"
+        return f"Next: “{self.sequence_queue[0].get('name') or 'Untitled sequence'}” ({more})"
+
+    def _notify_outcome(self, run):
+        fields = [("Took", sequence.fmt_time(run.elapsed()))]
+        queue_text = self._queue_text(run.outcome)
+        if run.outcome == "done":
+            skipped = sum(1 for s in run.cells.values() if s == sequence.SKIPPED)
+            if skipped:
+                fields.append(("Skipped", f"{skipped} step{'s' if skipped != 1 else ''}"))
+            given = [(label, ml) for label, ml in run.delivered.items() if ml > 0.005]
+            if given:
+                lines = [f"{label}: {ml:.2f} mL" for label, ml in given[:12]]
+                if len(given) > 12:
+                    lines.append(f"and {len(given) - 12} more")
+                fields.append(("Delivered", "\n".join(lines)))
+            if queue_text:
+                fields.append(("Queue", queue_text))
+            self.notify("done", f"Finished “{run.name}”", fields=fields)
+            return
+        if queue_text:
+            fields.append(("Queue", queue_text))
+        if run.outcome == "failed":
+            self.notify(
+                "failed",
+                f"“{run.name}” failed",
+                body=f"{run.why}. Every head it used was sent OFF.",
+                fields=fields,
+            )
+        else:
+            at = f" (at {run.stopped_at})" if run.stopped_at else ""
+            self.notify("stopped", f"“{run.name}” stopped", body=f"{run.why}{at}.", fields=fields)
+
+    def _notify_guard(self, pending, now=None):
+        """Tell Discord about heads that have waited ``GUARD_NOTIFY_S`` for a confirmed OFF, and
+        when none are left."""
+        now = time.monotonic() if now is None else now
+        for key in [k for k in self._guard_seen if k not in pending]:
+            del self._guard_seen[key]
+        for key in pending:
+            self._guard_seen.setdefault(key, now)
+        due = [
+            k for k, t in self._guard_seen.items() if now - t >= GUARD_NOTIFY_S and k not in self._guard_told
+        ]
+        if due:
+            self._guard_told |= set(due)
+            self.notify(
+                "guard",
+                "Can't confirm these heads are OFF: {items}",
+                body=(
+                    "The app keeps trying to turn them off. If a pump is offline, unplug it or switch it "
+                    "off by hand, then press “I've switched it off” in the app."
+                ),
+                items=[f"{self.head_label(*k)} ({pending[k]})" for k in due],
+                group="guard",
+            )
+        if self._guard_told and not pending:
+            self._guard_told = set()
+            self.notify("guard", "All clear: no heads are left to confirm OFF", ping=False)
+
+    def _pump_in_use(self, did):
+        if any(key[0] == did for key in self.head_runs):
+            return True
+        return self.run_active() and any(key[0] == did for key in self._run_lane_of)
+
+    def _notify_online(self, p, event, outage):
+        if event == "offline":
+            if not self._pump_in_use(p.did):
+                return
+            self._offline_told.add(p.did)
+            on = [self.head_label(*key) for key in self.head_runs if key[0] == p.did]
+            fields = [("Sequence", self.current_running_sequence or "")]
+            if on:
+                fields.append(("Heads that were on", "\n".join(on)))
+            self.notify(
+                "offline",
+                f"{p.name} went offline",
+                body=(
+                    "It lost its Wi-Fi or power while in use. A head that was on may keep pumping "
+                    "until the pump is back online (the app then turns it off). Switch it off by "
+                    "hand if you can."
+                ),
+                fields=fields,
+            )
+        elif p.did in self._offline_told:
+            self._offline_told.discard(p.did)
+            self.notify(
+                "offline",
+                f"{p.name} is back online",
+                body=f"After {netwatch.fmt_duration(outage)}.",
+                ping=False,
+            )
 
     async def send_cloud_command(self, did, attrs):
         """Send a command through the pump guard (see pumpguard.py), which keeps track of
@@ -1629,6 +1840,7 @@ class JebaoPumpGUI(QMainWindow):
         if banner is None:
             return
         pending = self.guard.pending()
+        self._tell_discord(self._notify_guard, pending)
         if not pending:
             self.guard_bar.setVisible(False)
             return
@@ -2073,6 +2285,7 @@ class JebaoPumpGUI(QMainWindow):
             self.refresh_approval_banner()
             run.finish(outcome, why)
             self._log_outcome(run)
+            self._tell_discord(self._notify_outcome, run)
             try:
                 sequence.append_history(self.run_history_path, run.record())
             except OSError as e:
@@ -2191,6 +2404,7 @@ class JebaoPumpGUI(QMainWindow):
             self._review_at[ch] = item.path
             ls.detail = message
             self.refresh_approval_banner()
+            self._tell_discord(self._notify_review, ch, item, message)
             if message:
                 self._show_review_popup(item)
             if step.get("sound"):
@@ -2444,6 +2658,14 @@ class JebaoPumpGUI(QMainWindow):
             f"[{label}] Reached its on-time limit ({limit.text()}). Resting until "
             f"{datetime.fromtimestamp(run.cooling_until):%H:%M}, then the dose carries on "
             f"({run.remaining / 60:.1f} min of pumping left)."
+        )
+        self._tell_discord(
+            self.notify,
+            "rest",
+            "Resting (on-time limit): {items}",
+            body="Each turns on again by itself when it may. The full volume still goes in, just later.",
+            items=[f"{label} until {datetime.fromtimestamp(run.cooling_until):%H:%M}"],
+            group="rest",
         )
         try:
             while time.time() < run.cooling_until:
