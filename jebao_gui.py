@@ -713,7 +713,8 @@ class SettingsDialog(QDialog):
         self.chk_limit.setToolTip(
             "A dose that reaches the limit turns the head off to rest, then carries on when it "
             "may (the full volume still goes in, just later). Each head can have its own limit "
-            "or none, in the Rack tab."
+            "or none, in the Rack tab; a head's own limit applies even when this is off, over "
+            "the window set here."
         )
         self.spin_limit_on = QSpinBox()
         self.spin_limit_on.setRange(1, 600)

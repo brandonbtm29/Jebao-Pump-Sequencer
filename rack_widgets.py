@@ -821,12 +821,17 @@ class RackTab(QWidget):
                 combo.addItem(f"At most {m} min", m)
             combo.setToolTip(
                 "How long this head may run in any window (the window and the default are in "
-                "Settings → Pump safety). A dose that reaches it rests, then carries on."
+                "Settings → Pump safety). A head's own limit applies even when the default is "
+                "turned off. A dose that reaches it rests, then carries on."
             )
             combo.currentIndexChanged.connect(lambda _i, ch=ch: self._save_limit(ch))
             form.addRow("", combo)
             self.limit_combos.append(combo)
         nl.addLayout(form)
+        self.lbl_limits = QLabel()
+        self.lbl_limits.setWordWrap(True)
+        self.lbl_limits.setStyleSheet("color: grey;")
+        nl.addWidget(self.lbl_limits)
         tip = QLabel(
             "Head names show on the Manual tiles and in the log. Leave a name empty to use the default."
         )
@@ -1012,11 +1017,37 @@ class RackTab(QWidget):
         limits = (list(cfg.get_pump(did).get("limits") or []) + [None] * 4)[:4]
         self._loading = True
         try:
+            self._label_limits()
             for combo, value in zip(self.limit_combos, limits, strict=True):
                 idx = combo.findData(value)
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
         finally:
             self._loading = False
+
+    def _label_limits(self):
+        """Say in the choices what the default is now, and under them the window a limit uses."""
+        g = self.host.config.data.get("guard", {})
+        window = int(g.get("window_min", 60))
+        on = bool(g.get("enabled", True))
+        default = f"Default ({int(g.get('on_min', 30))} min)" if on else "Default (off)"
+        for combo in self.limit_combos:
+            combo.setItemText(0, default)
+            combo.setItemData(
+                0,
+                f"The limit in Settings → Pump safety: {int(g.get('on_min', 30))} min in any {window} min"
+                if on
+                else "Settings → Pump safety has the limit turned off, so this head has none",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            for i in range(2, combo.count()):
+                combo.setItemData(
+                    i, f"At most {combo.itemData(i)} min in any {window} min", Qt.ItemDataRole.ToolTipRole
+                )
+        self.lbl_limits.setText(
+            f"On-time limits count over any {window} min (Settings → Pump safety). A head's own limit "
+            "applies even when the default is off"
+            + ("." if on else "; heads left on Default have no limit now.")
+        )
 
     def _save_names(self):
         did = getattr(self, "_names_for", None)  # the pump whose names are in the boxes

@@ -268,3 +268,17 @@ def test_jebao_app_name_is_shown_next_to_your_own(bench):
 
     rows = NetworkDialog(window, window).rows()
     assert any(r["name"] == "EtOH pump (Jebao app: JP 1)" for r in rows)
+
+
+def test_a_heads_own_limit_applies_with_the_default_off(bench):
+    window, _ = bench
+    window.config.data["guard"] = {"enabled": False, "on_min": 30, "window_min": 60}
+    window.config.get_pump("D2")["limits"] = [None, None, 20, None]
+    assert not window.head_limit(("D2", 1)).enabled  # the default: off
+    own = window.head_limit(("D2", 3))
+    assert own.enabled and own.on_s == 20 * 60 and own.window_s == 60 * 60
+    tab = window.rack_tab
+    tab.slot_clicked(next(s for s in tab.slots if s.did == "D2"))
+    assert tab.limit_combos[0].itemText(0) == "Default (off)"
+    assert tab.limit_combos[2].currentText() == "At most 20 min"
+    assert "applies even when the default is off" in tab.lbl_limits.text()
