@@ -4,6 +4,18 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-02
+
+### Added
+- **Each stack has its own CH numbers.** Stack A's heads are CH1–4, Stack B's CH5–8, Stack C's CH9–12 and so on. The numbers show on the Manual and Calibration tiles, in the Rack tab's Names panel, in the System Log and in the Sequencer. Pumps not in the rack stay CH1–4. Each pump is still sent its own channel, 1–4.
+- **The Sequencer runs each CH number as its own lane**, so two stacks give eight lanes.
+  - Stack B's heads run side by side with Stack A's, instead of waiting for them in the same lane.
+  - Wait for me, Sync columns, Wait (timer), Pause and Skip pick from CH1–CH8.
+  - The Running view shows a card and a progress column for each lane.
+
+### Changed
+- **Saved sequences do what they did before.** A Wait for me, timer, sync or Run sequence step made before this version applies to the same channel on every stack that the sequence pumps on. For example, a step on CH1 in a sequence that uses both stacks covers CH1 and CH5, as when they were one lane. To limit it to one stack, pick its channels again in the step's settings.
+
 ## [2.8.0] - 2026-11-02
 
 ### Fixed
@@ -280,7 +292,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.5.0...v2.6.0
