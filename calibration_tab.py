@@ -189,6 +189,10 @@ class _RunArea(QWidget):
 class CalibrationTab(QWidget):
     COL_RESULT, COL_ACTIONS = 7, 8
 
+    def _number(self, did, ch):
+        """The CH number shown for a head (CH5–8 for a pump in Stack B)."""
+        return getattr(self.host, "channel_number", lambda _d, c: c)(did, ch)
+
     def __init__(self, host, parent=None):
         super().__init__(parent)
         self.host = host
@@ -1176,7 +1180,7 @@ class CalibrationTab(QWidget):
             if b and b.slope_rate and r.old_rate:
                 change = (b.slope_rate - r.old_rate) / r.old_rate * 100.0
             cells = [
-                (f"{self.host.get_device_name(r.did)} · CH{r.ch}", left, None, r.label),
+                (f"{self.host.get_device_name(r.did)} · CH{self._number(r.did, r.ch)}", left, None, r.label),
                 (fmt_rate(b.slope_rate) if b else "—", right, None, None),
                 ("—" if change is None else f"{change:+.1f} %", right, None, None),
                 ("—" if not b or b.r2 is None else f"{b.r2:.4f}", right, None, None),
@@ -1319,7 +1323,7 @@ class CalibrationTab(QWidget):
         t.setRowCount(0)
         t.setRowCount(len(heads))
         for i, key in enumerate(heads):
-            item = QTableWidgetItem(f"{self.host.get_device_name(key[0])} · CH{key[1]}")
+            item = QTableWidgetItem(f"{self.host.get_device_name(key[0])} · CH{self._number(*key)}")
             item.setToolTip(self.host.head_label(*key))
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)

@@ -89,9 +89,10 @@ def fmt_seconds(seconds):
 class HeadTile(QPushButton):
     """One pump head: click to select it. Shows its name, rate and what it is doing."""
 
-    def __init__(self, did, ch, size="M", parent=None):
+    def __init__(self, did, ch, size="M", parent=None, number=None):
         super().__init__(parent)
-        self.did, self.ch = did, ch
+        self.did, self.ch = did, ch  # ch: the pump's own channel, 1–4
+        self.number = number or ch  # the CH number shown: CH5–8 for a pump in Stack B
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -100,7 +101,7 @@ class HeadTile(QPushButton):
         lay.setSpacing(3)
         top = QHBoxLayout()
         self.dot = QLabel("●")
-        self.lbl_ch = QLabel(f"CH{ch}")
+        self.lbl_ch = QLabel(f"CH{self.number}")
         self.lbl_rate = QLabel()
         top.addWidget(self.dot)
         top.addWidget(self.lbl_ch)
@@ -186,11 +187,11 @@ class HeadTile(QPushButton):
             f"HeadTile {{ text-align: left; border: {width}px {style} {border}; border-radius: 8px;"
             f" background: {'rgba(76,141,255,0.18)' if self.isChecked() else 'rgba(128,128,128,0.10)'}; }}"
         )
-        tip = f"{name or 'CH' + str(self.ch)} · {rate_text} mL/min"
+        tip = f"{name or 'CH' + str(self.number)} · {rate_text} mL/min"
         if uncalibrated:
             tip += " · not calibrated yet (Calibration tab)"
         self.setToolTip(tip)
-        label = f"Channel {self.ch}, {name}, {text}" + (", selected" if self.isChecked() else "")
+        label = f"Channel {self.number}, {name}, {text}" + (", selected" if self.isChecked() else "")
         self.setAccessibleName(label)
 
 
@@ -221,8 +222,9 @@ class PumpCard(QFrame):
         grid = QGridLayout()
         grid.setSpacing(6)
         self.tiles = []
+        number = getattr(tab.host, "channel_number", lambda _did, ch: ch)
         for ch in range(1, 5):
-            tile = HeadTile(did, ch, tab.tile_size)
+            tile = HeadTile(did, ch, tab.tile_size, number=number(did, ch))
             tile.setChecked((did, ch) in tab.selected)
             tile.toggled.connect(lambda on, key=(did, ch): tab.set_selected(key, on))
             grid.addWidget(tile, 0, ch - 1)
@@ -244,7 +246,7 @@ class PumpCard(QFrame):
         for tile in self.tiles:
             rate = pump["calibration"][tile.ch - 1]
             tile.show_state(
-                host.config.head_name(self.did, tile.ch) or f"Channel {tile.ch}",
+                host.config.head_name(self.did, tile.ch) or f"Channel {tile.number}",
                 f"{rate:.2f}",
                 is_uncalibrated(pump, tile.ch),
                 online,
@@ -550,7 +552,8 @@ class ManualTab(QWidget):
         heads = sorted(self.selected)
         n = len(heads)
         self.lbl_count.setText(f"{n} head{'s' if n != 1 else ''} selected")
-        names = [f"{host.get_device_name(d)} · CH{c}" for d, c in heads]
+        number = getattr(host, "channel_number", lambda _d, c: c)
+        names = [f"{host.get_device_name(d)} · CH{number(d, c)}" for d, c in heads]
         self.lbl_selection.setText(
             ", ".join(names[:12]) + (f" … and {n - 12} more" if n > 12 else "") or "None"
         )
@@ -807,12 +810,15 @@ class RackTab(QWidget):
         self.edit_pump.editingFinished.connect(self._save_names)
         form.addRow("Pump name:", self.edit_pump)
         self.edit_heads = []
+        self.head_labels = []  # "CH5:" for a pump in Stack B (set in _load_names)
         self.limit_combos = []
         for ch in range(1, 5):
             e = QLineEdit()
             e.setPlaceholderText("e.g. Water → Col 3")
             e.editingFinished.connect(self._save_names)
-            form.addRow(f"CH{ch}:", e)
+            row_label = QLabel(f"CH{ch}:")
+            self.head_labels.append(row_label)
+            form.addRow(row_label, e)
             self.edit_heads.append(e)
             combo = QComboBox()
             combo.addItem("Default on-time limit", None)
@@ -1012,6 +1018,10 @@ class RackTab(QWidget):
         )
         self.edit_pump.setPlaceholderText(cloud)
         self.edit_pump.setText(cfg.display_name(did))
+        number = getattr(self.host, "channel_number", lambda _d, ch: ch)
+        for ch, row_label in enumerate(self.head_labels, start=1):
+            row_label.setText(f"CH{number(did, ch)}:")
+            row_label.setToolTip(f"This pump's channel {ch}" if number(did, ch) != ch else "")
         for ch, e in enumerate(self.edit_heads, start=1):
             e.setText(cfg.head_name(did, ch))
         limits = (list(cfg.get_pump(did).get("limits") or []) + [None] * 4)[:4]

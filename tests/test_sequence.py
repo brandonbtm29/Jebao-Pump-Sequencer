@@ -5,12 +5,13 @@ from datetime import date
 import pytest
 
 import pumpguard
+import rack
 import sequence as sq
 
 MIN = 60.0
 
 
-def ctx(rates=None, online=None, dates=None, saved=None, names=None, limit=None, known=None):
+def ctx(rates=None, online=None, dates=None, saved=None, names=None, limit=None, known=None, **more):
     rates = rates if rates is not None else {}
     names = names or {}
     return sq.Context(
@@ -23,6 +24,7 @@ def ctx(rates=None, online=None, dates=None, saved=None, names=None, limit=None,
         pump_name=lambda did: {"A": "JP 1", "B": "JP 2", "C": "JP 3"}.get(did, did),
         known=known,
         today=date(2026, 10, 30),
+        **more,
     )
 
 
@@ -219,7 +221,7 @@ def test_run_state_tracks_cells_and_how_it_stopped():
     now = [1000.0]
     run = sq.RunState("Test", steps, p.flat, plan=p, clock=lambda: now[0])
     assert run.cells == {(0, 1): "todo", (0, 2): "todo", (1, 1): "todo", (1, 2): "todo"}
-    assert run.lanes[3].status == "idle"
+    assert 3 not in run.lanes  # only the lanes the sequence uses
     first = p.flat[0]
     run.begin(1, first)
     run.begin(2, first)
@@ -321,3 +323,57 @@ def test_wait_for_me_keeps_its_message():
     long = sq.normalize({**sq.new_step("review"), "message": "x" * 5000})
     assert len(long["message"]) == sq.MAX_MESSAGE
     assert sq.normalize({**sq.new_step("review"), "message": {"bad": 1}})["message"] == ""
+
+
+def two_stacks(**kw):
+    """Pump A in Stack A (CH1–4), pump B in Stack B (CH5–8)."""
+    groups = {"A": 0, "B": 1}
+    return ctx(
+        lane_of=lambda did, ch: rack.channel_number(groups, did, ch),
+        all_lanes=lambda: list(range(1, 9)),
+        **kw,
+    )
+
+
+def test_stack_b_heads_are_ch5_to_8_and_run_as_their_own_lanes():
+    c = two_stacks(rates={"A": 1.0, "B": 1.0}, names={("B", 1): "Sample → Col 5"})
+    steps = [dose([["A", 1]], ml=2), dose([["B", 1]], ml=1)]
+    p = sq.plan(steps, c)
+    assert p.used_lanes == [1, 5]
+    assert p.total_s == pytest.approx(120)  # side by side: before, the same lane, one after the other
+    assert sq.heads_text(steps[1], c) == "Sample → Col 5 (JP 2 · CH5)"
+    assert c.label("B", 4) == "JP 2 · CH8"
+    assert sq.heads_in_lane(dose([["A", 1], ["B", 1]], ml=1), 5, c) == [("B", 1)]
+
+
+def test_older_steps_cover_the_stacks_the_sequence_pumps_on():
+    c = two_stacks()
+    old_review = {"pump_did": None, "channel": [1, 3], "action": "Pause (User Review)", "val1": 0}
+    assert sq.lanes_of(sq.normalize(old_review), c) == [1, 3, 5, 7]  # CH1 then meant CH1 and CH5
+    only_a = [dose([["A", 1], ["A", 3]], ml=1), old_review]
+    flat, _ = sq.flatten(only_a, c)
+    assert flat[1].lanes == (1, 3)  # no Stack B heads in it: no empty CH5 and CH7 lanes
+    both = [dose([["A", 1], ["B", 1]], ml=1), old_review]
+    flat, _ = sq.flatten(both, c)
+    assert flat[1].lanes == (1, 5)  # CH3 has no pumping here either
+    assert sq.lanes_of(sq.normalize(old_review), sq.for_steps(c, both)) == [1, 5]
+    from_28 = {**sq.new_step("sync"), "lanes": [2]}
+    from_28.pop("cols")
+    assert sq.lanes_of(sq.normalize(from_28), c) == [2, 6]
+    new = sq.new_step("review", cols=[5, 6])
+    assert sq.lanes_of(new, c) == [5, 6] and new["lanes"] == [1, 2]
+    saved = sq.to_saved(new)
+    assert saved["cols"] == [5, 6] and saved["lanes"] == [1, 2] and saved["channel"] == [1, 2]
+    assert sq.normalize(saved) == sq.normalize(new)
+    assert sq.normalize({**new, "cols": [0, 99, "x", 7.0]})["cols"] == [7]
+
+
+def test_a_review_on_stack_b_only_stops_stack_b():
+    c = two_stacks(rates={"A": 1.0, "B": 1.0})
+    steps = [
+        dose([["A", 1], ["B", 1]], ml=1),
+        sq.new_step("review", cols=[5]),
+        dose([["A", 1], ["B", 1]], ml=1),
+    ]
+    flat, _ = sq.flatten(steps, c)
+    assert [(f.top, f.lanes) for f in flat] == [(0, (1, 5)), (1, (5,)), (2, (1, 5))]

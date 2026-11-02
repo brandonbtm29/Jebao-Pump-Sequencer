@@ -467,3 +467,87 @@ def test_wait_for_me_without_a_message_doesnt_pop_up(pumps, qt_loop):
         window.approve_channel(1)
 
     assert run(loop, window, [{**sq.new_step("review", lanes=[1]), "sound": False}], during) == "done"
+
+
+@pytest.fixture
+def stacks(pumps, monkeypatch):
+    """Pump A (JP 1) in Stack A, so CH1–4; pump B (JP 2) in Stack B, so CH5–8."""
+    import rack
+
+    window, sent, fail = pumps
+    layout = rack.normalize(
+        {
+            "slots_per_stack": 1,
+            "stacks": [{"name": "Stack A", "slots": ["A"]}, {"name": "Stack B", "slots": ["B"]}],
+        }
+    )
+    monkeypatch.setitem(window.config.data, "rack", layout)
+    for did in ("A", "B"):
+        window.config.get_pump(did)["head_names"] = ["", "", "", ""]
+        window.config.get_pump(did)["display_name"] = ""
+    return window, sent, fail
+
+
+def test_stack_b_is_ch5_to_8_but_its_pump_gets_its_own_channels(stacks, qt_loop):
+    window, sent, _ = stacks
+    _, loop = qt_loop
+    assert window.channel_number("B", 1) == 5 and window.channel_number("A", 4) == 4
+    assert window.all_lanes() == list(range(1, 9))
+    assert window.head_label("B", 2) == "JP 2 · CH6"
+    started = time.monotonic()
+    assert run(loop, window, [dose([["A", 1]], 0.4), dose([["B", 1]], 0.4)]) == "done"
+    assert time.monotonic() - started < 0.75  # CH1 and CH5 side by side, not one after the other
+    assert offs_and_ons(sent, "A", 1) == [True, False]
+    assert offs_and_ons(sent, "B", 1) == [True, False]  # the pump is sent its own channel 1
+    assert not any(k.startswith("channe5") for _d, a in sent for k in a)
+    assert sorted(window.seq_run.lanes) == [1, 5]
+
+
+def test_pausing_ch5_pauses_only_stack_b(stacks, qt_loop):
+    window, sent, _ = stacks
+    _, loop = qt_loop
+
+    async def during(task):
+        await until(lambda: ("A", 1) in window.head_runs and ("B", 1) in window.head_runs)
+        window.pause_lane(5, True)
+        await until(lambda: window.run_state("B", 1)[0] == "paused")
+        assert window.run_state("A", 1)[0] == "running"
+        await asyncio.sleep(0.2)
+        window.pause_lane(5, False)
+
+    assert run(loop, window, [dose([["A", 1], ["B", 1]], 0.4)], during) == "done"
+    assert offs_and_ons(sent, "B", 1) == [True, False, True, False]  # paused and resumed
+    assert offs_and_ons(sent, "A", 1) == [True, False]
+
+
+def test_wait_for_me_on_ch5_and_older_steps_on_both_stacks(stacks, qt_loop):
+    window, _sent, _ = stacks
+    _, loop = qt_loop
+    old = {"pump_did": None, "channel": [1], "action": "Pause (User Review)", "val1": 0, "val2": 0, "val3": 0}
+
+    async def during(task):
+        await until(lambda: window._ch_review_events.get(1) and window._ch_review_events.get(5))
+        assert window.btn_approve_channels[4].text() == "Continue CH5"
+        assert not window.btn_approve_channels[4].isHidden()
+        window.approve_all()
+
+    # A 2.6 Wait for me on channel 1, in a sequence that pumps on both stacks, waits on CH1 and
+    # CH5, as it did when they were one lane
+    assert run(loop, window, [dose([["A", 1], ["B", 1]], 0.1), old], during) == "done"
+
+    async def during_new(task):
+        await until(lambda: window._ch_review_events.get(5))
+        assert not window._ch_review_events.get(1)
+        window.approve_channel(5)
+
+    assert run(loop, window, [{**sq.new_step("review", cols=[5]), "sound": False}], during_new) == "done"
+
+
+def test_tiles_and_names_show_ch5_to_8(stacks):
+    window, _sent, _ = stacks
+    window.refresh_pumps()
+    tiles = {(t.did, t.ch): t for t in window.manual_tab.tiles()}
+    assert tiles[("B", 1)].lbl_ch.text() == "CH5" and tiles[("A", 1)].lbl_ch.text() == "CH1"
+    tab = window.rack_tab
+    tab.slot_clicked(next(s for s in tab.slots if s.did == "B"))
+    assert [lbl.text() for lbl in tab.head_labels] == ["CH5:", "CH6:", "CH7:", "CH8:"]

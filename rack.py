@@ -141,3 +141,27 @@ def auto_arrange(layout, dids, names):
 def order(layout, dids):
     """Every pump id: the placed ones in rack order, then the not-placed ones."""
     return placed(layout) + unplaced(layout, dids)
+
+
+CHANNELS = 4  # heads per pump
+
+
+def channel_groups(layout, dids=()):
+    """did -> which block of channel numbers its heads get: its stack (Stack A → 0, so CH1–4;
+    Stack B → 1, CH5–8; …). Pumps not in the rack get 0 (CH1–4), as before stacks existed."""
+    groups = {d: 0 for d in dids if d}
+    for si, stack in enumerate(layout["stacks"]):
+        for did in stack["slots"]:
+            if did:
+                groups[did] = si
+    return groups
+
+
+def channel_number(groups, did, ch):
+    """The CH number shown for a pump's channel ``ch`` (1–4): CH1–4 in Stack A, CH5–8 in Stack B, …"""
+    return groups.get(did, 0) * CHANNELS + ch
+
+
+def pump_channel(number):
+    """The pump's own channel (1–4) for a CH number: CH5 → 1, CH8 → 4."""
+    return (int(number) - 1) % CHANNELS + 1

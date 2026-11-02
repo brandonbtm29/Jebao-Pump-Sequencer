@@ -150,12 +150,10 @@ def test_reorder_by_drag_and_keyboard_moves(tab):
 
 def test_change_kind_keeps_label_and_lanes(tab):
     tab.add_step("wait")
-    tab._edit(0, label="Dry", lanes=[2, 3])
+    tab._edit(0, label="Dry", cols=[2, 3])
     tab._change_kind(0, "review")
     assert (
-        tab.steps[0]["kind"] == "review"
-        and tab.steps[0]["label"] == "Dry"
-        and tab.steps[0]["lanes"] == [2, 3]
+        tab.steps[0]["kind"] == "review" and tab.steps[0]["label"] == "Dry" and tab.steps[0]["cols"] == [2, 3]
     )
 
 

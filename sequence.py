@@ -16,11 +16,17 @@ Kinds (shown with the names in ``LABELS``):
 - ``sync``: the lanes wait for each other, and for what they started in the background.
 - ``sequence``: run the saved sequence ``name``.
 
-**Lanes.** The four lanes are the channel numbers CH1–CH4, as the app has always run
-them: each lane goes through the steps that use it in order, side by side with the
-other lanes. A dose or staccato step uses the lanes of its heads' channels; a lane runs
-that step on its own heads only (a step on JP 1 · CH1 and JP 6 · CH1 runs both heads in
-lane 1, together). The other kinds use ``lanes``.
+**Lanes.** A lane is a CH number, and each lane goes through the steps that use it in
+order, side by side with the other lanes. The CH numbers follow the rack: a pump's heads
+are CH1–4 in Stack A, CH5–8 in Stack B and so on (``rack.channel_number``; pumps not in
+the rack are CH1–4), so with two stacks there are eight lanes. A dose or staccato step
+uses the lanes of its heads, and a lane runs that step on its own heads only. The other
+kinds use ``cols``: a list of CH numbers.
+
+``heads`` always hold the pump's own channel (1–4), which is what the pump is sent. Steps
+from before stacks had their own numbers (2.8 and older) have no ``cols``: their
+``lanes`` are pump channels, and stand for that channel on every stack (``lanes`` [1] is
+CH1, CH5, CH9 …), which is what they did then.
 
 **Older sequences.** Steps saved by version 2.6 and older (``{"pump_did", "channel",
 "action", "val1", "val2", "val3"}``) are read too. Steps are saved with those fields as
@@ -40,6 +46,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import pumpguard
+import rack
 
 KINDS = ("dose", "staccato", "wait", "review", "sync", "sequence")
 LABELS = {
@@ -51,7 +58,9 @@ LABELS = {
     "sequence": "Run sequence",
 }
 PUMPING = ("dose", "staccato")
-LANES = (1, 2, 3, 4)
+CHANNELS = (1, 2, 3, 4)  # each pump's own channels
+LANES = CHANNELS  # the lanes when nothing else is known (one stack)
+MAX_LANE = rack.CHANNELS * rack.MAX_STACKS
 STALE_DAYS = 30  # a calibration older than this gets a warning
 MAX_ML = 100000.0  # bigger amounts in a saved step are cut to this
 MAX_S = 7 * 24 * 3600.0  # and longer times to a week
@@ -94,15 +103,28 @@ def _text(value):
     return str(value).strip()[:MAX_MESSAGE] if isinstance(value, (str, int, float)) else ""
 
 
-def _channel(value):
-    """1–4 from 1, "1" or 1.0, else None."""
+def _whole(value, low, high):
+    """A whole number low–high from 1, "1" or 1.0, else None."""
     try:
         f = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    if not math.isfinite(f) or not f.is_integer() or int(f) not in LANES:
+    if not math.isfinite(f) or not f.is_integer() or not low <= int(f) <= high:
         return None
     return int(f)
+
+
+def _channel(value):
+    """A pump channel, 1–4, or None."""
+    return _whole(value, 1, len(CHANNELS))
+
+
+def _cols(value):
+    """A list of CH numbers (lanes), or None when there is none."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    out = sorted({n for n in (_whole(v, 1, MAX_LANE) for v in value) if n is not None})
+    return out or None
 
 
 def _lanes(value, default=LANES):
@@ -127,12 +149,15 @@ def _heads(value):
     return out
 
 
-def new_step(kind, heads=None, lanes=None):
-    """A new step of ``kind`` with sensible amounts."""
+def new_step(kind, heads=None, lanes=None, cols=None):
+    """A new step of ``kind`` with sensible amounts. ``cols``: the CH numbers it runs on
+    (a wait, review, sync or sequence step); ``lanes``: older pump channels instead."""
+    cols = _cols(cols)
     step = {
         "kind": kind,
         "heads": _heads(heads),
-        "lanes": _lanes(lanes),
+        "lanes": sorted({rack.pump_channel(c) for c in cols}) if cols and lanes is None else _lanes(lanes),
+        "cols": cols,
         "by": "volume",
         "volume": 5.0,
         "seconds": 60.0 if kind == "wait" else 30.0,
@@ -159,6 +184,7 @@ def normalize(step):
             {
                 "heads": _heads(step.get("heads")),
                 "lanes": _lanes(step.get("lanes")),
+                "cols": _cols(step.get("cols")) if step["kind"] not in PUMPING else None,
                 "by": "time" if step.get("by") == "time" and step["kind"] == "dose" else "volume",
                 "volume": _num(step.get("volume"), out["volume"]),
                 "seconds": _num(step.get("seconds"), out["seconds"], MAX_S),
@@ -216,8 +242,11 @@ def to_saved(step):
     s = normalize(step)
     out = copy.deepcopy(s)
     kind = s["kind"]
+    if s["cols"]:  # what a copy that doesn't know CH numbers per stack goes by
+        out["lanes"] = sorted({rack.pump_channel(c) for c in s["cols"]})
     if not old_app_can_run(s):
-        out.update(pump_did=None, channel=lanes_of(s) or [1], val1=0, val2=0, val3=0)
+        chans = sorted({ch for _d, ch in s["heads"]}) if kind in PUMPING else out["lanes"]
+        out.update(pump_did=None, channel=chans or [1], val1=0, val2=0, val3=0)
         out["action"] = "Pause (User Review)"
         return out
     if kind in PUMPING:
@@ -235,7 +264,7 @@ def to_saved(step):
             kind, "Run Sub-Sequence"
         )
         out["pump_did"] = None
-        out["channel"] = list(s["lanes"])
+        out["channel"] = list(out["lanes"])
         out["val1"] = s["seconds"] if kind == "wait" else (s["name"] if kind == "sequence" else 0)
         out["val2"] = 0
         out["val3"] = 0
@@ -256,11 +285,20 @@ def heads_of(step):
     return [tuple(h) for h in step.get("heads") or []]
 
 
-def lanes_of(step):
-    """The lanes a step runs in: its heads' channels, or its ``lanes``."""
+def lanes_of(step, ctx=None):
+    """The lanes (CH numbers) a step runs in: its heads' numbers, or its ``cols``, or for
+    an older step its ``lanes`` channels on every stack."""
+    ctx = ctx or Context()
     if step.get("kind") in PUMPING:
-        return sorted({ch for _d, ch in heads_of(step)})
-    return list(step.get("lanes") or LANES)
+        return sorted({ctx.lane_of(did, ch) for did, ch in heads_of(step)})
+    if step.get("cols"):
+        return list(step["cols"])
+    return ctx.expand(step.get("lanes") or CHANNELS)
+
+
+def heads_in_lane(step, lane, ctx):
+    """A pumping step's heads that run in ``lane``."""
+    return [key for key in heads_of(step) if ctx.lane_of(*key) == lane]
 
 
 def step_problem(step):
@@ -458,6 +496,8 @@ class Context:
         pump_name=None,
         known=None,
         today=None,
+        lane_of=None,
+        all_lanes=None,
     ):
         self.rate = rate or (lambda did, ch: None)
         self.calibrated_at = calibrated_at or (lambda did, ch: None)
@@ -468,15 +508,45 @@ class Context:
         self.pump_name = pump_name or (lambda did: did)
         self.known = known  # did -> bool: is the pump on the account (None: don't check)
         self.today = today or date.today()
+        self.lane_of = lane_of or (lambda did, ch: ch)  # a head's CH number (see the module docstring)
+        self.all_lanes = all_lanes or (lambda: list(CHANNELS))  # every CH number the rack has
+        self.within = None  # the CH numbers the sequence pumps on (for_steps), for older steps
+
+    def expand(self, channels):
+        """Older steps' pump channels as CH numbers: that channel on each stack the sequence
+        pumps on ([1] → [1, 5] when it uses Stack A and B), else just the channel."""
+        chans = {rack.pump_channel(c) for c in channels}
+        pool = self.within if self.within is not None else self.all_lanes()
+        return [n for n in pool if rack.pump_channel(n) in chans] or sorted(chans)
 
     def label(self, did, ch):
-        """'JP 1 · CH2 (EtOH → Col 2)', as in the log."""
+        """'JP 6 · CH5 (Sample → Col 5)', as in the log."""
         name = self.head_name(did, ch)
-        text = f"{self.pump_name(did)} · CH{ch}"
+        text = f"{self.pump_name(did)} · CH{self.lane_of(did, ch)}"
         return f"{text} ({name})" if name else text
 
     def liquid(self, did, ch):
         return liquid_of(self.head_name(did, ch), self.pump_name(did))
+
+
+def pumping_lanes(steps, ctx, stack=frozenset()):
+    """The CH numbers a sequence's Dose and Staccato steps use, its sub-sequences' included."""
+    out = set()
+    for step in normalize_all(steps):
+        if step["kind"] in PUMPING:
+            out |= {ctx.lane_of(did, ch) for did, ch in heads_of(step)}
+        elif step["kind"] == "sequence" and step["name"] and step["name"] not in stack:
+            sub = ctx.saved(step["name"])
+            if isinstance(sub, list):
+                out |= pumping_lanes(sub, ctx, stack | {step["name"]})
+    return out
+
+
+def for_steps(ctx, steps, name=None):
+    """A copy of ``ctx`` that knows which CH numbers ``steps`` pump on (see Context.expand)."""
+    out = copy.copy(ctx)
+    out.within = sorted(pumping_lanes(steps, ctx, frozenset({name}) if name else frozenset()))
+    return out
 
 
 def heads_text(step, ctx):
@@ -489,7 +559,7 @@ def heads_text(step, ctx):
         groups.setdefault(did, []).append(ch)
     parts = []
     for did, chs in groups.items():
-        where = f"{ctx.pump_name(did)} · CH{compress_numbers(chs)}"
+        where = f"{ctx.pump_name(did)} · CH{compress_numbers(ctx.lane_of(did, ch) for ch in chs)}"
         names = [ctx.head_name(did, ch) for ch in sorted(chs)]
         named = compress_names(names) if all(names) else ""
         parts.append(f"{named} ({where})" if named else where)
@@ -501,7 +571,7 @@ def where_text(step, ctx):
     k = step["kind"]
     if k in PUMPING:
         return heads_text(step, ctx)
-    lanes = lanes_text(step["lanes"])
+    lanes = lanes_text(lanes_of(step, ctx))
     if k == "review":
         first = step.get("message", "").splitlines()[0] if step.get("message") else ""
         if first:
@@ -544,12 +614,14 @@ class Check:
 def flatten(steps, ctx, name=None):
     """Every step that will run, with sub-sequences opened up. Returns (flat, checks)."""
     out, checks = [], []
+    if ctx.within is None:
+        ctx = for_steps(ctx, steps, name)
 
     def walk(items, path, allowed, stack, via):
         for i, step in enumerate(items):
             p = path + (i,)
             where = f"Step {p[0] + 1}" + (f" (in “{via[-1]}”)" if via else "")
-            lanes = tuple(ln for ln in lanes_of(step) if ln in allowed)
+            lanes = tuple(ln for ln in lanes_of(step, ctx) if allowed is None or ln in allowed)
             if step["kind"] == "sequence":
                 sub_name = step["name"]
                 sub = ctx.saved(sub_name) if sub_name else None
@@ -566,7 +638,7 @@ def flatten(steps, ctx, name=None):
                 continue
             out.append(Flat(p, step, lanes, via))
 
-    walk(normalize_all(steps), (), set(LANES), {name} if name else set(), ())
+    walk(normalize_all(steps), (), None, {name} if name else set(), ())
     return out, checks
 
 
@@ -599,7 +671,7 @@ class HeadPlan:
 @dataclass
 class Plan:
     total_s: float = 0.0
-    lanes: dict = field(default_factory=lambda: {ln: [] for ln in LANES})
+    lanes: dict = field(default_factory=dict)  # lane -> [Segment], for every lane that has steps
     lane_step_s: dict = field(default_factory=dict)  # (lane, top) -> seconds in that step
     step_s: dict = field(default_factory=dict)  # top -> seconds (slowest lane; None: unknown)
     step_rest_s: dict = field(default_factory=dict)  # top -> the longest any head rests in it
@@ -683,8 +755,11 @@ def plan(steps, ctx, name=None, with_limit=True):
     p.flat = flat
     budget = pumpguard.OnTimeBudget()
     off = pumpguard.Limit(enabled=False)
-    t = {ln: 0.0 for ln in LANES}
-    bg = {ln: [] for ln in LANES}  # when each lane's background steps end
+    every = sorted({ln for item in flat for ln in item.lanes})
+    t = {ln: 0.0 for ln in every}
+    bg = {ln: [] for ln in every}  # when each lane's background steps end
+    for ln in every:
+        p.lanes[ln] = []
     head_busy = {}  # (did, ch) -> until when a background step uses it
     bg_span = {}  # top -> how long its background run takes
     work = [0]  # pumping runs worked out so far
@@ -739,7 +814,7 @@ def plan(steps, ctx, name=None, with_limit=True):
             # dose / staccato: this lane's heads, together
             ends = [start]
             lane_segs = []
-            for key in [h for h in heads_of(st) if h[1] == lane]:
+            for key in heads_in_lane(st, lane, ctx):
                 rate = ctx.rate(*key)
                 hp = p.heads.get(key)
                 if hp is None:
@@ -796,8 +871,8 @@ def plan(steps, ctx, name=None, with_limit=True):
                 t[lane] = end
                 add_lane_time(lane, top, end - start)
 
-    lane_end = {ln: max([t[ln]] + bg[ln]) for ln in LANES}
-    p.total_s = max(lane_end.values()) if flat else 0.0
+    lane_end = {ln: max([t[ln]] + bg[ln]) for ln in every}
+    p.total_s = max(lane_end.values()) if lane_end else 0.0
     p.used_lanes = sorted(used_lanes)
     for (_lane, top), seconds in p.lane_step_s.items():
         p.step_s[top] = max(p.step_s.get(top, 0.0), seconds)
@@ -844,7 +919,7 @@ def _check(steps, flat, p, ctx, with_limit):
                     Check("info", f"{n}: the burst is as big as the whole volume, so it's one burst.", top)
                 )
             for key in heads_of(st):
-                if item.lanes and key[1] not in item.lanes:
+                if item.lanes and ctx.lane_of(*key) not in item.lanes:
                     continue
                 seen_heads.setdefault(key, top)
         elif kind == "wait" and st["seconds"] <= 0:
@@ -996,7 +1071,8 @@ class RunState:
         self.ended = None
         self.outcome = None  # "done", "stopped", "failed"
         self.why = ""
-        self.lanes = {ln: LaneState(ln) for ln in LANES}
+        every = sorted({ln for item in flat for ln in item.lanes}) or list(LANES)
+        self.lanes = {ln: LaneState(ln) for ln in every}
         self._todo = {}  # (top, lane) -> flat steps left in that cell
         for item in flat:
             for lane in item.lanes:
@@ -1004,7 +1080,7 @@ class RunState:
                 self._todo[key] = self._todo.get(key, 0) + 1
         self.cells = {key: TODO for key in self._todo}
         self._mixed = {}  # (top, lane) -> outcomes so far
-        for ln in LANES:
+        for ln in self.lanes:
             if not any(lane == ln for (_t, lane) in self._todo):
                 self.lanes[ln].status = "idle"
         self.delivered = {}  # head label -> mL
@@ -1089,7 +1165,7 @@ class RunState:
             return None if self.plan is None else 0.0
         now = self.clock()
         worst = 0.0
-        for ln in LANES:
+        for ln in self.lanes:
             left = 0.0
             for (lane, top), seconds in self.plan.lane_step_s.items():
                 if lane != ln:

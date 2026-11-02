@@ -47,6 +47,7 @@ APP_NAME = "Jebao Pump Sequencer"  # also names the single-instance lock
 # Window size, position and dividers: per computer, in the app folder (gitignored), never synced
 WINDOW_STATE_FILE = "window_state.json"
 import asyncio
+import collections
 import contextlib
 import html
 import json
@@ -119,6 +120,7 @@ class HeadRun:
     cancelled: bool = False
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     cooling_until: float | None = None  # resting after its on-time limit (time.time())
+    lane: int | None = None  # a sequence's lane (CH number) it runs in; ch is the pump's own channel
 
     @property
     def key(self):
@@ -850,17 +852,14 @@ class JebaoPumpGUI(QMainWindow):
         self.guard.on_stopped = self._guard_stopped
         self.guard.on_over_limit = self._guard_over_limit
 
-        import asyncio
-
-        self._ch_paused = {1: False, 2: False, 3: False, 4: False}
-        self._ch_cancelled = {1: False, 2: False, 3: False, 4: False}
-        self._ch_resume_events = {
-            1: asyncio.Event(),
-            2: asyncio.Event(),
-            3: asyncio.Event(),
-            4: asyncio.Event(),
-        }
-        self._ch_review_events = {1: None, 2: None, 3: None, 4: None}
+        # Per sequence lane, keyed by CH number (CH1–4 in Stack A, CH5–8 in Stack B, …)
+        self._ch_paused = {}
+        self._ch_cancelled = {}
+        self._ch_resume_events = collections.defaultdict(asyncio.Event)
+        self._ch_review_events = {}
+        self._groups_key = None
+        self._groups = {}
+        self._run_lane_of = {}  # (did, ch) -> lane, fixed when a run starts
 
         self.setup_ui()
         self._build_status_bar()
@@ -918,24 +917,18 @@ class JebaoPumpGUI(QMainWindow):
             "QLabel { color: #FFE2C2; border: none; }"
         )
         banner_layout = QHBoxLayout(self.approval_banner)
+        self._banner_layout = banner_layout
         banner_layout.setContentsMargins(12, 8, 12, 8)
         self.lbl_approval = QLabel()
         self.lbl_approval.setWordWrap(True)
         banner_layout.addWidget(self.lbl_approval, 1)
-        self.btn_approve_channels = []
-        for i in range(4):
-            btn = QPushButton(f"Continue CH{i + 1}")
-            btn.setEnabled(False)
-            btn.setVisible(False)
-            btn.setStyleSheet(APPROVE_STYLE)
-            btn.clicked.connect(lambda checked, ch=i + 1: self.approve_channel(ch))
-            self.btn_approve_channels.append(btn)
-            banner_layout.addWidget(btn)
+        self.btn_approve_channels = []  # index = CH number − 1; more are added for more stacks
         self.btn_approve_all = QPushButton("Continue all")
         self.btn_approve_all.setEnabled(False)
         self.btn_approve_all.setStyleSheet(APPROVE_ALL_STYLE)
         self.btn_approve_all.clicked.connect(self.approve_all)
         banner_layout.addWidget(self.btn_approve_all)
+        self._approve_buttons(4)
         self.approval_banner.setVisible(False)
         main_layout.addWidget(self.approval_banner)
 
@@ -1345,16 +1338,29 @@ class JebaoPumpGUI(QMainWindow):
         self.refresh_approval_banner()
 
     def approve_all(self):
-        for ch in range(1, 5):
+        for ch in list(self._ch_review_events):
             self.approve_channel(ch)
+
+    def _approve_buttons(self, count):
+        """Make sure there is a Continue button for CH1 … CH``count``."""
+        while len(self.btn_approve_channels) < count:
+            ch = len(self.btn_approve_channels) + 1
+            btn = QPushButton(f"Continue CH{ch}")
+            btn.setEnabled(False)
+            btn.setVisible(False)
+            btn.setStyleSheet(APPROVE_STYLE)
+            btn.clicked.connect(lambda checked, ch=ch: self.approve_channel(ch))
+            self.btn_approve_channels.append(btn)
+            self._banner_layout.insertWidget(self._banner_layout.indexOf(self.btn_approve_all), btn)
 
     def refresh_approval_banner(self):
         """Show the orange banner while any channel waits for review, with a button per waiting channel."""
-        waiting = [ch for ch in range(1, 5) if self._ch_review_events.get(ch)]
-        for ch in range(1, 5):
-            btn = self.btn_approve_channels[ch - 1]
+        waiting = sorted(ch for ch, event in self._ch_review_events.items() if event)
+        self._approve_buttons(max(waiting, default=0))
+        for ch, btn in enumerate(self.btn_approve_channels, start=1):
             btn.setEnabled(ch in waiting)
             btn.setVisible(ch in waiting)
+            btn.setText(f"Continue CH{ch}" if len(waiting) <= 4 else f"CH{ch}")
         self.btn_approve_all.setEnabled(bool(waiting))
         self.btn_approve_all.setVisible(len(waiting) > 1)
         if waiting:
@@ -1796,6 +1802,8 @@ class JebaoPumpGUI(QMainWindow):
             head_name=self.config.head_name,
             pump_name=self.get_device_name,
             known=(lambda did: did in listed) if listed else None,
+            lane_of=self.channel_number,
+            all_lanes=self.all_lanes,
         )
 
     def plan_sequence(self, steps, name=None, with_limit=True):
@@ -1875,7 +1883,7 @@ class JebaoPumpGUI(QMainWindow):
             logger.info(f"[CH{ch}] Resumed.")
 
     def pause_run(self, paused):
-        for ch in self.lanes_in_use() or list(sequence.LANES):
+        for ch in self.lanes_in_use() or self.all_lanes():
             self.pause_lane(ch, paused)
 
     def skip_step(self, ch):
@@ -1990,19 +1998,24 @@ class JebaoPumpGUI(QMainWindow):
         plan = self.plan_sequence(steps, name=seq_name)
         run = sequence.RunState(seq_name, steps, plan.flat, plan=plan)
         self.seq_run = run
-        self._ch_running_tasks = {ch: [] for ch in sequence.LANES}
+        lanes = sorted({ch for item in plan.flat for ch in item.lanes})
+        # Which lane each head runs in, fixed for this run (moving pumps in the rack meanwhile
+        # doesn't move their steps to other lanes halfway through)
+        self._run_lane_of = {
+            key: self.channel_number(*key) for item in plan.flat for key in sequence.heads_of(item.step)
+        }
+        self._ch_running_tasks = {ch: [] for ch in lanes}
         self._ch_step_tasks = {}
         self._ch_current = {}
         self._skip = {}
         self._sync_points = {}
         self._run_problem = None
-        for ch in sequence.LANES:
+        for ch in set(lanes) | set(self._ch_paused):
             self._ch_paused[ch] = False
             self._ch_resume_events[ch].set()
         for check in plan.checks:
             if check.level == "error":
                 logger.warning(f"[{seq_name}] {check.text}")
-        lanes = sorted({ch for item in plan.flat for ch in item.lanes})
         logger.info(
             f"=== Starting “{seq_name}”: {len(steps)} step{'s' if len(steps) != 1 else ''} on "
             f"{sequence.lanes_text(lanes)}, about {sequence.fmt_time(plan.total_s)} ==="
@@ -2045,7 +2058,7 @@ class JebaoPumpGUI(QMainWindow):
                 for task in leftovers:
                     if task.done() and not task.cancelled():
                         task.exception()
-            for ch in sequence.LANES:
+            for ch in set(lanes) | set(self._ch_review_events) | set(self._ch_paused):
                 if self._ch_review_events.get(ch):
                     self._ch_review_events[ch].set()
                     self._ch_review_events[ch] = None
@@ -2212,7 +2225,7 @@ class JebaoPumpGUI(QMainWindow):
             problem = sequence.step_problem(step)
             if problem:
                 raise RuntimeError(f"{sequence.title(step)}: {problem}, so the run stops here")
-            heads = [key for key in sequence.heads_of(step) if key[1] == ch]
+            heads = [key for key in sequence.heads_of(step) if self._lane_for(key) == ch]
             await self._together([self._run_head(ch, item, run, key, background) for key in heads])
 
     def _show_review_popup(self, item):
@@ -2245,9 +2258,10 @@ class JebaoPumpGUI(QMainWindow):
         if popup is not None:
             popup.remove_lane(ch)
 
-    async def _run_head(self, ch, item, run, key, background=False):
-        """One head's part of a dose or staccato step."""
-        did, _ = key
+    async def _run_head(self, lane, item, run, key, background=False):
+        """One head's part of a dose or staccato step, in ``lane`` (its CH number).
+        ``key`` is (pump, the pump's own channel): what the commands go to."""
+        did, ch = key
         step = item.step
         label = self.head_label(did, ch)
         rate = self._head_rate(did, ch)
@@ -2256,15 +2270,15 @@ class JebaoPumpGUI(QMainWindow):
             raise RuntimeError(f"{label} has no flow rate. Calibrate it first.")
         bursts = sum(1 for what, _ in pattern if what == "pump")
         pumping = sum(s for what, s in pattern if what == "pump")
-        where = f"CH{ch} · step {item.top + 1}"
+        where = f"CH{lane} · step {item.top + 1}"
         if (did, ch) in self.head_runs:  # a background step or a manual dose still has it
             logger.info(f"[{where}] Waiting for {label} to finish what it is doing first.")
             if not background:
-                run.lanes[ch].detail = f"waiting for {label} to be free"
+                run.lanes[lane].detail = f"waiting for {label} to be free"
             while (did, ch) in self.head_runs:
                 await asyncio.sleep(0.1)
         logger.info(f"[{where}] {sequence.describe(step)} on {label}: motor on {sequence.fmt_time(pumping)}.")
-        ls = run.lanes[ch]
+        ls = run.lanes[lane]
         done = 0
         for what, seconds in pattern:
             if what == "gap":
@@ -2273,17 +2287,17 @@ class JebaoPumpGUI(QMainWindow):
                     if not background:
                         ls.detail = f"burst {done} of {bursts} done · next in {sequence.fmt_clock(left)}"
 
-                await self._interruptible_sleep_timer(ch, seconds, tick=tick)
+                await self._interruptible_sleep_timer(lane, seconds, tick=tick)
                 continue
             done += 1
             if bursts > 1 and not background:
                 ls.detail = f"burst {done} of {bursts}"
             meter = []
             try:
-                await self._timed_run(did, ch, seconds, meter=meter)
+                await self._timed_run(did, ch, seconds, meter=meter, lane=lane)
             finally:
                 if rate and meter:
-                    run.add_delivered(label, meter[0] * rate / 60.0, lane=ch, background=background)
+                    run.add_delivered(label, meter[0] * rate / 60.0, lane=lane, background=background)
 
     async def _together(self, coros):
         """Run several heads' jobs at once. If one fails or is cancelled, the others are
@@ -2327,8 +2341,10 @@ class JebaoPumpGUI(QMainWindow):
             if tick is not None:
                 tick(max(0.0, left))
 
-    def _begin_head_run(self, did, ch, seconds, source):
-        run = HeadRun(did=did, ch=ch, duration=float(seconds), remaining=float(seconds), source=source)
+    def _begin_head_run(self, did, ch, seconds, source, lane=None):
+        run = HeadRun(
+            did=did, ch=ch, duration=float(seconds), remaining=float(seconds), source=source, lane=lane
+        )
         self.head_runs[run.key] = run
         return run
 
@@ -2337,38 +2353,67 @@ class JebaoPumpGUI(QMainWindow):
             del self.head_runs[run.key]
 
     def head_label(self, did, ch):
-        """'JP 1: EtOH · CH2 (EtOH → Col 2)': pump name, channel and, if set, the head's own name."""
+        """'JP 6: Sample · CH5 (Sample → Col 5)': pump name, CH number and, if set, the head's
+        own name. ``ch`` is the pump's own channel (1–4); the CH number follows the rack."""
         name = self.config.head_name(did, ch)
-        text = f"{self.get_device_name(did)} · CH{ch}"
+        text = f"{self.get_device_name(did)} · CH{self.channel_number(did, ch)}"
         return f"{text} ({name})" if name else text
 
-    async def _interruptible_motor_run(self, ch, pump_did, seconds, source="sequence", meter=None):
+    # --- CH numbers: CH1–4 in Stack A, CH5–8 in Stack B, … (rack.channel_number) -------------
+
+    def _channel_groups(self):
+        dids = tuple(d.get("did") for d in self.cloud_devices)
+        layout = self.config.data.get("rack")
+        key = (json.dumps(layout, sort_keys=True, default=str), dids)
+        if key != self._groups_key:
+            self._groups = rack.channel_groups(rack.normalize(layout or {}), dids)
+            self._groups_key = key
+        return self._groups
+
+    def channel_number(self, did, ch):
+        """The CH number shown (and the sequence lane) for a pump's own channel ``ch``."""
+        return rack.channel_number(self._channel_groups(), did, ch)
+
+    def all_lanes(self):
+        """Every CH number the rack has: CH1–4, plus CH5–8 with a second stack in use, …"""
+        groups = set(self._channel_groups().values()) or {0}
+        return sorted(g * rack.CHANNELS + c for g in groups for c in sequence.CHANNELS)
+
+    def _lane_for(self, key):
+        """The lane a head runs in during the current run (else its CH number now)."""
+        lane = self._run_lane_of.get(tuple(key))
+        return lane if lane is not None else self.channel_number(*key)
+
+    async def _interruptible_motor_run(self, ch, pump_did, seconds, source="sequence", meter=None, lane=None):
         """Keep a head's motor on for ``seconds``, honouring pause and cancel.
 
-        A sequence's channel can be paused or cancelled as a whole (``_ch_paused`` /
-        ``_ch_cancelled``); any single head can also be paused or cancelled from the
-        Manual tab (its ``HeadRun``). ``meter`` (a list) gets the seconds it really pumped.
+        ``ch`` is the pump's own channel (what the commands go to). A sequence's lane (its CH
+        number, ``lane``; the pump channel if not given) can be paused or cancelled as a
+        whole (``_ch_paused`` / ``_ch_cancelled``); any single head can also be paused or
+        cancelled from the Manual tab (its ``HeadRun``). ``meter`` (a list) gets the seconds
+        it really pumped.
         """
         channel_key = f"channe{ch}"
         by_channel = source == "sequence"
+        lane = ch if lane is None else lane
         if by_channel:
-            self._ch_cancelled[ch] = False
-        run = self._begin_head_run(pump_did, ch, seconds, source)
+            self._ch_cancelled[lane] = False
+        run = self._begin_head_run(pump_did, ch, seconds, source, lane=lane if by_channel else None)
         try:
             while run.remaining > 0:
-                if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
+                if run.cancelled or (by_channel and self._ch_cancelled.get(lane, False)):
                     await self.send_cloud_command(pump_did, {channel_key: False})
-                    raise asyncio.CancelledError(f"Channel {ch} dose cancelled.")
+                    raise asyncio.CancelledError(f"CH{lane} dose cancelled.")
 
-                if run.paused or (by_channel and self._ch_paused.get(ch, False)):
+                if run.paused or (by_channel and self._ch_paused.get(lane, False)):
                     await self.send_cloud_command(pump_did, {channel_key: False})
                     logger.info(f"[{self.head_label(pump_did, ch)}] Paused mid-dose. Waiting to resume...")
                     while (
-                        run.paused or (by_channel and self._ch_paused.get(ch, False))
+                        run.paused or (by_channel and self._ch_paused.get(lane, False))
                     ) and not run.cancelled:
                         await asyncio.sleep(0.1)  # resumed, or cancelled, from either place
-                    if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
-                        raise asyncio.CancelledError(f"Channel {ch} dose cancelled while paused.")
+                    if run.cancelled or (by_channel and self._ch_cancelled.get(lane, False)):
+                        raise asyncio.CancelledError(f"CH{lane} dose cancelled while paused.")
                     logger.info(f"[{self.head_label(pump_did, ch)}] Resuming ({run.remaining:.1f} s left).")
                     if self.guard.over_limit(run.key):
                         continue  # rest first; it turns on again after
@@ -2390,6 +2435,7 @@ class JebaoPumpGUI(QMainWindow):
     async def _rest_head(self, run, by_channel):
         """The head used up its on-time budget: turn it off, wait, then carry on."""
         did, ch = run.key
+        lane = run.lane if run.lane is not None else ch
         label = self.head_label(did, ch)
         limit = self.head_limit(run.key)
         await self.send_cloud_command(did, {f"channe{ch}": False})
@@ -2401,13 +2447,13 @@ class JebaoPumpGUI(QMainWindow):
         )
         try:
             while time.time() < run.cooling_until:
-                if run.cancelled or (by_channel and self._ch_cancelled.get(ch, False)):
-                    raise asyncio.CancelledError(f"Channel {ch} dose cancelled while resting.")
+                if run.cancelled or (by_channel and self._ch_cancelled.get(lane, False)):
+                    raise asyncio.CancelledError(f"CH{lane} dose cancelled while resting.")
                 await asyncio.sleep(min(1.0, max(0.05, run.cooling_until - time.time())))
                 run.cooling_until = max(run.cooling_until, self.guard.resume_at(run.key))
         finally:
             run.cooling_until = None
-        if run.paused or (by_channel and self._ch_paused.get(ch, False)):
+        if run.paused or (by_channel and self._ch_paused.get(lane, False)):
             return  # paused while resting: it turns on again when resumed
         logger.info(f"[{label}] Rested; carrying on ({run.remaining / 60:.1f} min of pumping left).")
         await self._turn_on(did, ch)
@@ -2421,7 +2467,8 @@ class JebaoPumpGUI(QMainWindow):
             return None
         if run.cooling_until is not None:
             return ("cooling", run.progress, max(0.0, run.cooling_until - time.time()))
-        paused = run.paused or (run.source == "sequence" and self._ch_paused.get(ch, False))
+        lane = run.lane if run.lane is not None else ch
+        paused = run.paused or (run.source == "sequence" and self._ch_paused.get(lane, False))
         return ("paused" if paused else "running", run.progress, max(0.0, run.remaining))
 
     def dispense_seconds(self, did, ch, value, unit):
@@ -2529,14 +2576,15 @@ class JebaoPumpGUI(QMainWindow):
                 run.cancelled = True
                 run.resume.set()
 
-    async def _timed_run(self, did, ch, seconds, source="sequence", meter=None):
+    async def _timed_run(self, did, ch, seconds, source="sequence", meter=None, lane=None):
         """ON, keep it on for ``seconds`` (pausing, cancelling and resting as needed), OFF.
-        The OFF is sent however the run ends, even if the step is cancelled or fails."""
+        The OFF is sent however the run ends, even if the step is cancelled or fails.
+        ``ch`` is the pump's own channel; ``lane`` the sequence lane (CH number) it pauses with."""
         channel_key = f"channe{ch}"
         try:
             if not self.guard.over_limit((did, ch)):  # over it: the run rests first, then turns on
                 await self._turn_on(did, ch)
-            await self._interruptible_motor_run(ch, did, seconds, source, meter=meter)
+            await self._interruptible_motor_run(ch, did, seconds, source, meter=meter, lane=lane)
         finally:
             await self.send_cloud_command(did, {channel_key: False})
 

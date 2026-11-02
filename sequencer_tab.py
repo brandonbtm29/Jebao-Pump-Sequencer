@@ -806,7 +806,7 @@ class LaneCard(QFrame):
         heads = []
         resting = False
         for (did, ch), hr in sorted(getattr(host, "head_runs", {}).items()):
-            if ch != self.lane or hr.source != "sequence":
+            if hr.source != "sequence" or (hr.lane if hr.lane is not None else ch) != self.lane:
                 continue
             st = host.run_state(did, ch)
             if not st:
@@ -1407,8 +1407,13 @@ class SequencerTab(QWidget):
         self._building = False
         self._selection_changed()
 
+    def _ctx(self):
+        """What the app knows about the pumps, for this sequence (older steps' channels cover
+        the stacks it pumps on: see sequence.Context.expand)."""
+        return sq.for_steps(self.host.plan_context(), self.steps, self.name)
+
     def _card(self, i, step):
-        plan, ctx = self.plan, self.host.plan_context()
+        plan, ctx = self.plan, self._ctx()
         kind = step["kind"]
         seconds = plan.step_s.get(i) if plan else None
         rest = plan.step_rest_s.get(i, 0.0) if plan else 0.0
@@ -1473,10 +1478,11 @@ class SequencerTab(QWidget):
         self._changed(structure=True, select=new_rows or [0], inspector=True)
 
     def _lanes_so_far(self, before=None):
-        """The lanes the pumping steps use (for a new timer or review step), or all four."""
+        """The lanes (CH numbers) the pumping steps use, for a new timer or review step; or all."""
         steps = self.steps[:before] if before is not None else self.steps
-        lanes = sorted({ch for s in steps if s["kind"] in sq.PUMPING for _d, ch in sq.heads_of(s)})
-        return lanes or list(sq.LANES)
+        number = self.host.channel_number
+        lanes = sorted({number(d, ch) for s in steps if s["kind"] in sq.PUMPING for d, ch in sq.heads_of(s)})
+        return lanes or self.host.all_lanes()
 
     def _previous_heads(self, i):
         for s in reversed(self.steps[:i]):
@@ -1487,7 +1493,7 @@ class SequencerTab(QWidget):
     def add_step(self, kind):
         rows = self._selected_rows()
         at = rows[-1] + 1 if rows else len(self.steps)
-        step = sq.new_step(kind, heads=self._previous_heads(at), lanes=self._lanes_so_far(at))
+        step = sq.new_step(kind, heads=self._previous_heads(at), cols=self._lanes_so_far(at))
         if kind in ("dose", "staccato") and at > 0:
             prev = self.steps[at - 1]
             if prev["kind"] == kind:
@@ -1765,8 +1771,8 @@ class SequencerTab(QWidget):
         old = self.steps[i]
         if old["kind"] == kind:
             return
-        lanes = sq.lanes_of(old) or self._lanes_so_far(i)
-        new = sq.new_step(kind, heads=old["heads"] or self._previous_heads(i), lanes=lanes)
+        lanes = sq.lanes_of(old, self._ctx()) or self._lanes_so_far(i)
+        new = sq.new_step(kind, heads=old["heads"] or self._previous_heads(i), cols=lanes)
         new["label"] = old["label"]
         if kind in sq.PUMPING and old["kind"] in sq.PUMPING:
             new["volume"] = old["volume"]
@@ -1841,9 +1847,9 @@ class SequencerTab(QWidget):
                 )
                 pump.clicked.connect(lambda _c, did=did: self._toggle_pump(i, did))
                 row.addWidget(pump)
-                for ch in sq.LANES:
+                for ch in sq.CHANNELS:
                     head = host.config.head_name(did, ch)
-                    chip = QPushButton(sq.short_head_name(head, ch))
+                    chip = QPushButton(sq.short_head_name(head, host.channel_number(did, ch)))
                     chip.setCheckable(True)
                     chip.setMinimumWidth(30)
                     chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -1914,7 +1920,7 @@ class SequencerTab(QWidget):
         if len(mine) == 4:
             heads = [h for h in heads if h[0] != did]
         else:
-            heads = [h for h in heads if h[0] != did] + [[did, ch] for ch in sq.LANES]
+            heads = [h for h in heads if h[0] != did] + [[did, ch] for ch in sq.CHANNELS]
         heads.sort(key=lambda h: (self._pump_order(h[0]), h[1]))
         self._set_heads(i, heads)
 
@@ -1980,19 +1986,22 @@ class SequencerTab(QWidget):
 
     def _lane_picker(self, i, step):
         self._section("Channels")
-        row = QHBoxLayout()
-        lanes = set(step["lanes"])
-        for ch in sq.LANES:
+        grid = QGridLayout()
+        lanes = set(sq.lanes_of(step, self._ctx()))
+        every = sorted(set(self.host.all_lanes()) | lanes)
+        for n, ch in enumerate(every):
             b = QPushButton(f"CH{ch}")
             b.setCheckable(True)
             b.setChecked(ch in lanes)
             b.setStyleSheet(SEGMENTED)
+            b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             b.clicked.connect(lambda on, ch=ch: self._toggle_lane(i, ch, on))
-            row.addWidget(b)
+            grid.addWidget(b, n // 4, n % 4)
         b_all = QPushButton("All")
-        b_all.clicked.connect(lambda: self._edit(i, inspector=True, lanes=list(sq.LANES)))
-        row.addWidget(b_all)
-        self.insp_lay.addLayout(row)
+        b_all.setToolTip("Every channel: " + sq.lanes_text(self.host.all_lanes()))
+        b_all.clicked.connect(lambda: self._edit(i, inspector=True, cols=self.host.all_lanes()))
+        grid.addWidget(b_all, 0, 4)
+        self.insp_lay.addLayout(grid)
         kind = step["kind"]
         text = {
             "wait": "These channels wait; the others carry on.",
@@ -2005,7 +2014,7 @@ class SequencerTab(QWidget):
         self.insp_lay.addWidget(grey(text, 11))
 
     def _toggle_lane(self, i, ch, on):
-        lanes = set(self.steps[i]["lanes"])
+        lanes = set(sq.lanes_of(self.steps[i], self._ctx()))
         if on:
             lanes.add(ch)
         else:
@@ -2013,7 +2022,7 @@ class SequencerTab(QWidget):
         if not lanes:  # at least one: put it back
             self._rebuild_inspector()
             return
-        self._edit(i, key="lanes", lanes=sorted(lanes))
+        self._edit(i, key="cols", cols=sorted(lanes))
         self._update_cards()
 
     def _update_estimate(self):
@@ -2034,9 +2043,9 @@ class SequencerTab(QWidget):
             self._style_chips(i)
 
     def _estimate_text(self, i, step):
-        plan, ctx = self.plan, self.host.plan_context()
+        plan, ctx = self.plan, self._ctx()
         kind = step["kind"]
-        lanes = sq.lanes_text(sq.lanes_of(step))
+        lanes = sq.lanes_text(sq.lanes_of(step, ctx))
         if kind in sq.PUMPING:
             heads = sq.heads_of(step)
             if not heads:
@@ -2508,10 +2517,10 @@ class SequencerTab(QWidget):
         """A short name for each lane in the timeline: the heads' short names ('Col 1')."""
         ctx = self.host.plan_context()
         out = {}
-        for lane in sq.LANES:
+        for lane in plan.used_lanes:
             names = []
             for key in plan.heads:
-                if key[1] == lane:
+                if ctx.lane_of(*key) == lane:
                     names.append(sq.short_head_name(ctx.head_name(*key), lane))
             names = list(dict.fromkeys(n for n in names if n != f"CH{lane}"))
             out[lane] = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
@@ -2654,22 +2663,19 @@ class SequencerTab(QWidget):
         lay.addWidget(self.rn_header)
 
         self.lane_grid = QGridLayout()
-        self.lane_cards = {ln: LaneCard(self, ln) for ln in sq.LANES}
-        for i, ln in enumerate(sq.LANES):
-            self.lane_grid.addWidget(self.lane_cards[ln], 0, i)
+        self.lane_cards = {}  # lane -> LaneCard, made for the lanes the run uses (_lay_out_lanes)
+        self._card_lanes = None
+        self._grid_lanes = []
         lay.addLayout(self.lane_grid)
 
         lay.addWidget(heading("Progress by step", 13))
-        self.grid = QTableWidget(0, 5)
-        self.grid.setHorizontalHeaderLabels(["Step", "CH1", "CH2", "CH3", "CH4"])
+        self.grid = QTableWidget(0, 1)
+        self.grid.setHorizontalHeaderLabels(["Step"])
         self.grid.verticalHeader().setVisible(False)
         self.grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.grid.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         gh = self.grid.horizontalHeader()
         gh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, 5):
-            gh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
-            self.grid.setColumnWidth(c, 96)
         lay.addWidget(self.grid)
 
         bottom = QHBoxLayout()
@@ -2784,11 +2790,12 @@ class SequencerTab(QWidget):
         self.grid.setVisible(run is not None)
         if run is None:
             return
+        self._lay_out_lanes(run)
         live = run.ended is None
         stopping = live and run.stopping
         lanes = host.lanes_in_use()
         paused = live and lanes and all(host._ch_paused.get(ch) for ch in lanes)
-        waiting = live and any(host._ch_review_events.get(ch) for ch in sq.LANES)
+        waiting = live and any(host._ch_review_events.values())
         if not live:
             state, color = {
                 "done": ("FINISHED", "#2FB36D"),
@@ -2837,23 +2844,46 @@ class SequencerTab(QWidget):
             card.setVisible(ln in used)
         self._refresh_grid(run)
 
+    def _lay_out_lanes(self, run):
+        """A card per lane the run uses, four to a row (eight with two stacks)."""
+        used = sorted({ln for it in run.flat for ln in it.lanes}) or sorted(run.lanes)
+        if used == self._card_lanes:
+            return
+        self._card_lanes = used
+        for card in self.lane_cards.values():
+            self.lane_grid.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+        self.lane_cards = {ln: LaneCard(self, ln) for ln in used}
+        for n, ln in enumerate(used):
+            self.lane_grid.addWidget(self.lane_cards[ln], n // 4, n % 4)
+
     def _refresh_grid(self, run):
         n = len(run.steps)
-        if self.grid.rowCount() != n or self._grid_cache.get("run") is not run:
+        lanes = sorted({ln for it in run.flat for ln in it.lanes}) or sorted(run.lanes)
+        if self.grid.rowCount() != n or self._grid_cache.get("run") is not run or lanes != self._grid_lanes:
             self._grid_cache = {"run": run}
+            self._grid_lanes = lanes
+            self.grid.setColumnCount(1 + len(lanes))
+            self.grid.setHorizontalHeaderLabels(["Step"] + [f"CH{ln}" for ln in lanes])
+            gh = self.grid.horizontalHeader()
+            gh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            for c in range(1, 1 + len(lanes)):
+                gh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
+                self.grid.setColumnWidth(c, 96 if len(lanes) <= 4 else 72)
             self.grid.setRowCount(n)
             for r, step in enumerate(run.steps):
                 self.grid.setItem(r, 0, QTableWidgetItem(f"{r + 1}. {sq.title(step)}"))
-                for c in range(1, 5):
+                for c in range(1, 1 + len(lanes)):
                     self.grid.setItem(r, c, QTableWidgetItem(""))
             self.grid.setFixedHeight(min(360, 32 + 28 * max(1, n)))
         for r in range(n):
-            for ln in sq.LANES:
+            for c, ln in enumerate(lanes, start=1):
                 state = run.cells.get((r, ln))
                 if self._grid_cache.get((r, ln)) == state:
                     continue
                 self._grid_cache[(r, ln)] = state
-                item = self.grid.item(r, ln)
+                item = self.grid.item(r, c)
                 if state is None:
                     item.setText("")
                     continue
@@ -2879,7 +2909,7 @@ class SequencerTab(QWidget):
         run = host.seq_run
         if host.run_active() and run is not None:
             left = run.left_s()
-            waiting = [ch for ch in sq.LANES if host._ch_review_events.get(ch)]
+            waiting = sorted(ch for ch, event in host._ch_review_events.items() if event)
             text = f"● Running “{run.name}”"
             if waiting:
                 text = f"● Waiting for you: {sq.lanes_text(waiting)} · “{run.name}”"
