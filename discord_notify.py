@@ -123,7 +123,38 @@ def settings(saved=None):
         "pings": {k: bool(pings.get(k, ping)) for k, (_l, _s, ping) in EVENTS.items()},
         "mention_id": str(saved.get("mention_id") or "").strip(),
         "mention_kind": kind if kind in ("user", "role") else "user",
+        # the Lab Manager bot (lab_manager.py) instead of the webhook
+        "mode": "bot" if saved.get("mode") == "bot" else "webhook",
+        "channel_id": str(saved.get("channel_id") or "").strip(),
+        "allowed_ids": [str(i).strip() for i in (saved.get("allowed_ids") or []) if _ID.match(str(i).strip())]
+        if isinstance(saved.get("allowed_ids"), list)
+        else [],
+        "keep_days": _days(saved.get("keep_days"), KEEP_DAYS_DEFAULT),
     }
+
+
+KEEP_DAYS_DEFAULT = 7
+API = "https://discord.com/api/v10"
+
+
+def _days(value, default):
+    try:
+        days = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return min(max(days, 0), 365)
+
+
+def check_channel(channel_id):
+    """Empty if ``channel_id`` looks like a Discord channel ID, else the problem."""
+    if not _ID.match((channel_id or "").strip()):
+        return "A channel ID is 15 to 22 digits (right-click the channel → Copy Channel ID)."
+    return ""
+
+
+def bot_target(token, channel_id):
+    """(url, headers) to post in ``channel_id`` as the bot."""
+    return f"{API}/channels/{channel_id.strip()}/messages", {"Authorization": f"Bot {token.strip()}"}
 
 
 def _cut(text, limit):
@@ -192,6 +223,7 @@ class _Item:
     footer: str = ""
     on_done: object = None  # on_done(ok, problem), called from the sending thread
     count: int = 1  # notes merged into this one
+    headers: dict = None  # the bot's: posts in a channel instead of a webhook
 
 
 def _backoff(attempt):
@@ -237,13 +269,17 @@ class Notifier:
 
     # --- from the app ---------------------------------------------------------------------
 
-    def send(self, url, note, mention_id="", mention_kind="user", footer="", on_done=None):
-        """Queue ``note`` for ``url``. Returns False (and sends nothing) if it can't go."""
-        problem = check_url(url)
+    def send(self, url, note, mention_id="", mention_kind="user", footer="", on_done=None, headers=None):
+        """Queue ``note`` for ``url`` (a webhook; or, with ``headers`` from ``bot_target``, a
+        channel the bot posts in). Returns False (and sends nothing) if it can't go."""
+        if headers is None:
+            problem = check_url(url)
+        else:
+            problem = "" if str(url).startswith(f"{API}/channels/") else "Not a Discord channel."
         if problem or self._closing.is_set():
             self._done(on_done, False, problem or "The app is closing.")
             return False
-        item = _Item(url.strip(), note, mention_id, mention_kind, footer, on_done)
+        item = _Item(url.strip(), note, mention_id, mention_kind, footer, on_done, headers=headers)
         self._start()
         with self._cond:
             self._waiting += 1
@@ -336,11 +372,15 @@ class Notifier:
 
     def _deliver(self, item):
         body = payload(item.note, item.mention_id, item.mention_kind, item.footer)
+        extra = {}
+        if item.headers:
+            body.pop("username", None)  # a bot posts under its own name
+            extra["headers"] = item.headers
         post = self._post or requests.post
         problem = ""
         for attempt in range(RETRIES + 1):
             try:
-                resp = post(item.url, json=body, timeout=TIMEOUT_S)
+                resp = post(item.url, json=body, timeout=TIMEOUT_S, **extra)
             except Exception as e:
                 problem, wait = f"couldn't reach Discord ({scrub(type(e).__name__)})", _backoff(attempt)
             else:

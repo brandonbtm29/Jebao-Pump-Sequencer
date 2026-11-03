@@ -28,6 +28,8 @@ import crash_log
 import diagnostics
 import discord_notify
 import eventlog
+import lab_cards
+import lab_manager
 import netwatch
 import pumpguard
 import rack
@@ -58,6 +60,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -133,6 +136,12 @@ class HeadRun:
         if self.duration <= 0:
             return 1.0
         return max(0.0, min(1.0, 1.0 - self.remaining / self.duration))
+
+
+class _LabBridge(QObject):
+    """Carries a button pressed in Discord (the bot's thread) to the main thread."""
+
+    pressed = pyqtSignal(object)
 
 
 class ChannelBusy(RuntimeError):
@@ -890,6 +899,17 @@ class JebaoPumpGUI(QMainWindow):
         self._guard_seen = {}  # head -> when it first showed in the red bar
         self._guard_told = set()  # heads Discord has been told about
         self._offline_told = set()  # pumps Discord was told went offline while in use
+        # The Lab Manager bot (lab_manager.py; what it shows: lab_cards.py)
+        self._run_id = ""  # names the running (or last) run's card in Discord
+        self._review_remote = {}  # lane -> its Wait for me step may be continued from Discord
+        self._lab_outcome = None  # how the last run ended, while it should stay in Discord
+        self._lab_bridge = _LabBridge()
+        self._lab_bridge.pressed.connect(self._lab_pressed)
+        self.lab = lab_manager.LabManager(
+            on_action=self._lab_action_from_bot,
+            on_status=lambda text: logger.info(f"Lab Manager (Discord): {text}."),
+            closed_card=lambda key: lab_cards.closed_card(key, self.discord_footer()),
+        )
 
         self.setup_ui()
         self._build_status_bar()
@@ -1066,6 +1086,11 @@ class JebaoPumpGUI(QMainWindow):
         self.guard_timer.timeout.connect(self.refresh_guard_banner)
         self.guard_timer.start(5000)
 
+        # The Lab Manager's run card follows the run
+        self.lab_timer = QTimer(self)
+        self.lab_timer.timeout.connect(self._publish_lab)
+        self.lab_timer.start(3000)
+
     def set_log_collapsed(self, collapsed):
         """Shrink the System Log to its header (showing the latest line), or open it again."""
         if collapsed == self.log_collapsed:
@@ -1217,6 +1242,7 @@ class JebaoPumpGUI(QMainWindow):
         if check_updates_on_start(self.config):
             self._run_in_background(lambda _say: updater.latest_release(__version__), self.show_update_state)
         self.maintain_desktop_shortcut()
+        self.restart_lab()
 
     # --- desktop shortcut kept up to date -----------------------------------------------------
 
@@ -1273,6 +1299,8 @@ class JebaoPumpGUI(QMainWindow):
             if self._queue_task is not None and not self._queue_task.done():
                 self._queue_task.cancel()  # nothing is running or queued (or it was all stopped)
             self.discord.close(timeout=2.0)  # what's left to tell Discord, briefly
+            self._publish_lab()
+            self.lab.stop(timeout=3.0)
             event.accept()
             return
         event.ignore()
@@ -1361,7 +1389,7 @@ class JebaoPumpGUI(QMainWindow):
         """What Copy Diagnostics must never show: the Jebao login, the cloud token, pump IDs and MACs."""
         values = [self.secrets.data.get("username"), self.secrets.data.get("password"), self.cloud_token]
         webhook = self.secrets.data.get("discord_webhook")
-        values += [webhook, discord_notify.webhook_token(webhook)]
+        values += [webhook, discord_notify.webhook_token(webhook), self.secrets.data.get("discord_bot_token")]
         for d in self.cloud_devices:
             values += [d.get("did"), d.get("mac"), d.get("passcode"), d.get("product_key")]
         values += list(self.config.data.get("pumps") or {})
@@ -1595,6 +1623,8 @@ class JebaoPumpGUI(QMainWindow):
         s = discord_notify.settings(self.config.data.get("discord"))
         if not s["enabled"]:
             return "off"
+        if s["mode"] == "bot":
+            return f"Lab Manager bot: {self.lab.status}"
         url = self.secrets.data.get("discord_webhook", "")
         if discord_notify.check_url(url):
             return "on, but the webhook URL is missing or wrong"
@@ -1610,6 +1640,118 @@ class JebaoPumpGUI(QMainWindow):
             fn(*args, **kwargs)
         except Exception as e:
             logger.warning(f"Discord notification skipped ({type(e).__name__}: {discord_notify.scrub(e)}).")
+        self._publish_lab()
+
+    # --- the Lab Manager bot -----------------------------------------------------------------
+
+    def lab_settings(self):
+        """The bot's settings, or None when it shouldn't run."""
+        s = discord_notify.settings(self.config.data.get("discord"))
+        token = str(self.secrets.data.get("discord_bot_token") or "").strip()
+        if not (
+            s["enabled"]
+            and s["mode"] == "bot"
+            and token
+            and not discord_notify.check_channel(s["channel_id"])
+        ):
+            return None
+        allowed = list(s["allowed_ids"])
+        if not allowed and s["mention_kind"] == "user" and s["mention_id"]:
+            allowed = [s["mention_id"]]
+        store = os.path.join(eventlog.log_dir(DATA_DIR), f"lab-manager-{eventlog.computer_name()}.json")
+        return lab_manager.Settings(token, s["channel_id"], tuple(allowed), s["keep_days"], store)
+
+    def restart_lab(self):
+        """Start the Lab Manager with the current settings (or stop it if it's switched off)."""
+        settings = self.lab_settings()
+        if settings is None:
+            if self.lab.running():
+                self.lab.stop()
+            return
+        if self.lab.start(settings):
+            self._publish_lab()
+        else:
+            logger.warning(f"Lab Manager (Discord) didn't start: {self.lab.status}.")
+
+    def _publish_lab(self):
+        if not self.lab.running():
+            return
+        try:
+            s = discord_notify.settings(self.config.data.get("discord"))
+            self.lab.publish(lab_cards.specs(self, s, self.lab.instance))
+        except Exception as e:  # never in the way of a run
+            logger.debug(f"Lab Manager: couldn't work out its messages ({type(e).__name__}: {e}).")
+
+    def _lab_action_from_bot(self, action, arg, user):
+        """Called from the bot's thread: hand the press to the main thread, answer later."""
+        answer = lab_manager.answer_later()
+        self._lab_bridge.pressed.emit((action, arg, user, answer))
+        return answer
+
+    def _lab_pressed(self, payload):
+        action, arg, user, answer = payload
+        try:
+            text = self.lab_do(action, arg, user)
+        except Exception as e:
+            logger.warning(f"[Discord] {user}'s button press failed ({type(e).__name__}: {e}).")
+            text = "That didn't work; see the System Log."
+        if not answer.done():
+            answer.set_result(text)
+        self._publish_lab()
+
+    def lab_do(self, action, arg, user):
+        """Do what a button in Discord asks, if it still makes sense. Returns the reply."""
+        if action == "dismiss":
+            if self._lab_outcome and self._lab_outcome["run_id"] == arg:
+                self._lab_outcome = None
+            return "Cleared."
+        run = self.seq_run
+        run_id, _, rest = arg.partition("|")
+        if run is None or run.ended or run_id != self._run_id:
+            return "That run has ended, so nothing was done."
+        if action in ("go", "goall"):
+            path_key, _, lane = rest.partition("|")
+            waiting = [ln for ln, event in self._ch_review_events.items() if event]
+            lanes = [int(lane)] if action == "go" else sorted(waiting)
+            here = [
+                ln
+                for ln in lanes
+                if ln in waiting and "-".join(str(p) for p in self._review_at.get(ln, ())) == path_key
+            ]
+            if not here:
+                return "Nothing is waiting there any more."
+            if not all(self._review_remote.get(ln) for ln in here):
+                return "This step doesn't allow Continue from Discord. Continue in the app."
+            for ln in here:
+                logger.info(f"[Discord] {user} pressed Continue CH{ln}.")
+                self.approve_channel(ln)
+            return f"Continued {sequence.lanes_text(here)}."
+        if action in ("pause", "resume"):
+            paused = action == "pause"
+            logger.warning(f"[Discord] {user} {'paused' if paused else 'resumed'} “{run.name}”.")
+            self.pause_run(paused)
+            return "Paused every channel." if paused else "Resumed."
+        if action == "stopyes":
+            logger.warning(f"[Discord] {user} pressed Stop run.")
+            self.stop_run(f"{user} pressed Stop in Discord")
+            return "Stopping: every head it uses is being turned off, and the queue is paused."
+        return "That button isn't known."
+
+    def _lab_note_outcome(self, run):
+        """How a run ended, for the bot: a failed one (or, if set to ping, any) gets a message."""
+        s = discord_notify.settings(self.config.data.get("discord"))
+        event = {"done": "done", "failed": "failed"}.get(run.outcome, "stopped")
+        if not s["events"].get(event) or (event != "failed" and not s["pings"].get(event)):
+            self._lab_outcome = None
+            return
+        took = sequence.fmt_time(run.elapsed())
+        title = {
+            "done": f"Finished “{run.name}”",
+            "failed": f"“{run.name}” failed",
+            "stopped": f"“{run.name}” stopped",
+        }[event]
+        body = f"After {took}." if event == "done" else f"After {took}: {run.why}."
+        self._lab_outcome = {"run_id": self._run_id, "event": event, "title": title, "body": body}
 
     def discord_footer(self):
         return f"{eventlog.computer_name()} · Jebao Pump Sequencer {__version__}"
@@ -1628,8 +1770,8 @@ class JebaoPumpGUI(QMainWindow):
         in Settings → Discord. Returns True if it was queued. Never waits for Discord."""
         s = discord_notify.settings(self.config.data.get("discord"))
         url = self.secrets.data.get("discord_webhook", "")
-        if not s["enabled"] or not s["events"].get(event) or not url:
-            return False
+        if not s["enabled"] or not s["events"].get(event) or not url or s["mode"] == "bot":
+            return False  # (the Lab Manager bot shows what's going on its own way)
         clean = self._discord_text
         note = discord_notify.Note(
             event,
@@ -1654,6 +1796,21 @@ class JebaoPumpGUI(QMainWindow):
         )
         return self.discord.send(
             url, note, s["mention_id"], s["mention_kind"], self.discord_footer(), on_done
+        )
+
+    def discord_test_bot(self, token, channel_id, values, on_done=None):
+        """Settings → Discord → Send a test message, as the Lab Manager bot."""
+        s = discord_notify.settings(values)
+        url, headers = discord_notify.bot_target(token, channel_id)
+        note = discord_notify.Note(
+            "test",
+            "Test message from Lab Manager",
+            body="Run cards and pings from this computer will come here.",
+            fields=[("Computer", eventlog.computer_name())],
+            ping=bool(s["mention_id"]),
+        )
+        return self.discord.send(
+            url, note, s["mention_id"], s["mention_kind"], self.discord_footer(), on_done, headers=headers
         )
 
     def _notify_review(self, ch, item, message):
@@ -2229,6 +2386,9 @@ class JebaoPumpGUI(QMainWindow):
         plan = self.plan_sequence(steps, name=seq_name, checks=self._run_checks)
         run = sequence.RunState(seq_name, steps, plan.flat, plan=plan)
         self.seq_run = run
+        self._run_id = uuid.uuid4().hex[:10]
+        self._review_remote = {}
+        self._lab_outcome = None
         lanes = sorted({ch for item in plan.flat for ch in item.lanes})
         # Which lane each head runs in, fixed for this run (moving pumps in the rack meanwhile
         # doesn't move their steps to other lanes halfway through)
@@ -2302,6 +2462,7 @@ class JebaoPumpGUI(QMainWindow):
             run.finish(outcome, why)
             self._log_outcome(run)
             self._tell_discord(self._notify_outcome, run)
+            self._tell_discord(self._lab_note_outcome, run)
             try:
                 sequence.append_history(self.run_history_path, run.record())
             except OSError as e:
@@ -2418,6 +2579,7 @@ class JebaoPumpGUI(QMainWindow):
             )
             self._ch_review_messages[ch] = message
             self._review_at[ch] = item.path
+            self._review_remote[ch] = bool(step.get("remote"))
             ls.detail = message
             self.refresh_approval_banner()
             self._tell_discord(self._notify_review, ch, item, message)
@@ -2436,7 +2598,9 @@ class JebaoPumpGUI(QMainWindow):
                 self._ch_review_titles.pop(ch, None)
                 self._ch_review_messages.pop(ch, None)
                 self._review_at.pop(ch, None)
+                self._review_remote.pop(ch, None)
                 self.refresh_approval_banner()
+                self._publish_lab()
             logger.info(f"[{where}] Continued.")
         elif kind == "sync":
             mine = [t for t in self._ch_running_tasks.get(ch, []) if not t.done()]

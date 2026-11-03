@@ -1785,6 +1785,14 @@ class SequencerTab(QWidget):
             sound.setChecked(bool(step.get("sound", True)))
             sound.toggled.connect(lambda on: self._edit(i, sound=on))
             lay.addWidget(sound)
+            remote = QCheckBox("Allow Continue from Discord")
+            remote.setChecked(bool(step.get("remote")))
+            remote.setToolTip(
+                "With the Lab Manager bot (Settings → Discord), its message about this step gets "
+                "Continue buttons. Leave it off for a step that needs you at the bench."
+            )
+            remote.toggled.connect(lambda on: self._edit(i, remote=on))
+            lay.addWidget(remote)
         elif kind == "sync":
             self._lane_picker(i, step)
         elif kind == "sequence":

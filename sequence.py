@@ -4,7 +4,7 @@ A sequence is a list of steps. Each step is a dict like::
 
     {"kind": "dose", "heads": [["did", 1], ["did", 2]], "by": "volume", "volume": 6.0,
      "seconds": 0.0, "burst": 0.0, "gap": 0.0, "background": False, "label": "Condition",
-     "lanes": [1, 2, 3, 4], "name": "", "sound": True, "message": ""}
+     "lanes": [1, 2, 3, 4], "name": "", "sound": True, "message": "", "remote": False}
 
 Kinds (shown with the names in ``LABELS``):
 
@@ -180,6 +180,7 @@ def new_step(kind, heads=None, lanes=None, cols=None):
         "name": "",
         "sound": True,
         "message": "",
+        "remote": False,  # Wait for me: may be continued from Discord (Lab Manager)
     }
     if kind == "staccato":
         step["volume"] = 10.0
@@ -207,6 +208,7 @@ def normalize(step):
                 "name": str(step.get("name") or ""),
                 "sound": bool(step.get("sound", True)),
                 "message": _text(step.get("message")) if step["kind"] == "review" else "",
+                "remote": bool(step.get("remote")) and step["kind"] == "review",
             }
         )
         return out
