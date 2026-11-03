@@ -399,7 +399,9 @@ def test_run_now_starts_one_run_while_the_queue_stays_paused(pumps, qt_loop):
     window.queue_paused = False
 
 
-def test_wait_for_me_message_pops_up_and_is_in_the_bar(pumps, qt_loop):
+def test_wait_for_me_message_is_in_the_bar_without_a_pop_up(pumps, qt_loop):
+    from PyQt6.QtWidgets import QApplication, QDialog
+
     window, _sent, _ = pumps
     _, loop = qt_loop
     note = "Move the sample lines to the collection tubes."
@@ -408,65 +410,33 @@ def test_wait_for_me_message_pops_up_and_is_in_the_bar(pumps, qt_loop):
         {**sq.new_step("review", lanes=[1, 2]), "label": "Collect", "message": note, "sound": False},
     ]
     window.current_running_sequence = "Elute"
-    seen = {}
 
     async def during(task):
-        await until(lambda: window._review_popups)
-        popup = next(iter(window._review_popups.values()))
-        assert popup.isVisible() and popup.message.text() == note
-        assert popup.lanes == {1} and popup.btn_continue.text() == "Continue CH1"
+        await until(lambda: window._ch_review_events.get(1))
         assert note in window.lbl_approval.text()
         assert window.seq_run.lanes[1].detail == note
-        popup.btn_later.click()  # Not yet: the pop-up closes, the run keeps waiting
-        assert not window._review_popups and not task.done()
-        await until(lambda: window._review_popups)  # CH2 arrives: it pops up again, for both
-        popup = next(iter(window._review_popups.values()))
-        seen["lanes"] = set(popup.lanes)
-        popup.btn_continue.click()
+        assert not [w for w in QApplication.topLevelWidgets() if isinstance(w, QDialog) and w.isVisible()]
+        await until(lambda: window._ch_review_events.get(2))
+        window.approve_all()
 
     assert run(loop, window, steps, during, name="Elute") == "done"
-    assert seen["lanes"] == {1, 2}
-    assert not window._review_popups and window.approval_banner.isHidden()
+    assert window.approval_banner.isHidden()
     window.current_running_sequence = None
 
 
-def test_continuing_from_the_bar_closes_the_pop_up(pumps, qt_loop):
-    window, _sent, _ = pumps
-    _, loop = qt_loop
-    steps = [{**sq.new_step("review", lanes=[3]), "message": "Swap the waste bottle.", "sound": False}]
-
-    async def during(task):
-        await until(lambda: window._review_popups)
-        window.approve_channel(3)
-
-    assert run(loop, window, steps, during) == "done"
-    assert window._review_popups == {}
-
-
-def test_stopping_a_run_closes_its_pop_up(pumps, qt_loop):
+def test_stopping_a_run_clears_the_bar(pumps, qt_loop):
     window, _sent, _ = pumps
     _, loop = qt_loop
     steps = [{**sq.new_step("review", lanes=[1]), "message": "Check the column.", "sound": False}]
 
     async def during(task):
-        await until(lambda: window._review_popups)
+        await until(lambda: window._ch_review_events.get(1))
+        assert not window.approval_banner.isHidden()
         window.stop_run()
 
     assert run(loop, window, steps, during) == "cancelled"
-    assert window._review_popups == {} and window.approval_banner.isHidden()
+    assert window.approval_banner.isHidden()
     window.queue_paused = False
-
-
-def test_wait_for_me_without_a_message_doesnt_pop_up(pumps, qt_loop):
-    window, _sent, _ = pumps
-    _, loop = qt_loop
-
-    async def during(task):
-        await until(lambda: window._ch_review_events.get(1))
-        assert window._review_popups == {}
-        window.approve_channel(1)
-
-    assert run(loop, window, [{**sq.new_step("review", lanes=[1]), "sound": False}], during) == "done"
 
 
 @pytest.fixture

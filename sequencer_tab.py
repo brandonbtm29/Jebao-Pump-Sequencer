@@ -47,7 +47,6 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -676,76 +675,6 @@ class StatCard(QFrame):
         lay.addWidget(self.note)
         lay.addStretch(1)
         self.extra = lay
-
-
-class ReviewPopup(QDialog):
-    """A Wait for me step's message, popped up when a channel gets there (not modal, so the
-    app keeps running the pumps). Continue lets every channel waiting at the step go on;
-    Not yet only closes the pop-up, and the run keeps waiting (the orange bar stays)."""
-
-    def __init__(self, host, name, step_number, title, message, parent=None):
-        super().__init__(parent or host)
-        self.host = host
-        self.lanes = set()
-        self.setWindowTitle(f"Waiting for you · step {step_number}")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self.setModal(False)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setMinimumWidth(460)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 16, 18, 14)
-        top = QLabel("⚠ Waiting for you")
-        top.setStyleSheet("color: #F08A24; font-size: 17px; font-weight: 700;")
-        lay.addWidget(top)
-        where = f"“{name}” · step {step_number} · {title}" if name else f"Step {step_number} · {title}"
-        lay.addWidget(grey(where, 12))
-        self.message = QLabel(message)
-        self.message.setTextFormat(Qt.TextFormat.PlainText)
-        self.message.setWordWrap(True)
-        self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.message.setStyleSheet(
-            "QLabel { font-size: 16px; padding: 12px; border: 1px solid #8A5420; border-radius: 8px;"
-            " background: rgba(240, 138, 36, 0.14); }"
-        )
-        lay.addWidget(self.message)
-        self.who = grey("", 12)
-        lay.addWidget(self.who)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        self.btn_later = QPushButton("Not yet")
-        self.btn_later.setToolTip("Close this. The run keeps waiting; continue from the orange bar later.")
-        self.btn_later.clicked.connect(self.reject)
-        self.btn_continue = QPushButton("Continue")
-        self.btn_continue.setDefault(True)
-        self.btn_continue.setStyleSheet(
-            "QPushButton { background-color: #F08A24; color: #1D1205; font-weight: bold; padding: 8px 16px; }"
-        )
-        self.btn_continue.clicked.connect(self._continue)
-        row.addWidget(self.btn_later)
-        row.addWidget(self.btn_continue)
-        lay.addLayout(row)
-        self.setAccessibleName(f"Waiting for you. {message}")
-
-    def add_lane(self, ch):
-        self.lanes.add(ch)
-        self._update()
-
-    def remove_lane(self, ch):
-        self.lanes.discard(ch)
-        if self.lanes:
-            self._update()
-        else:
-            self.done(0)
-
-    def _update(self):
-        chans = sq.lanes_text(sorted(self.lanes))
-        self.who.setText(f"{chans} {'is' if len(self.lanes) == 1 else 'are'} waiting here.")
-        self.btn_continue.setText(f"Continue {chans}")
-
-    def _continue(self):
-        for ch in sorted(self.lanes):
-            self.host.approve_channel(ch)
-        self.done(1)
 
 
 class LaneCard(QFrame):
@@ -1723,8 +1652,8 @@ class SequencerTab(QWidget):
             lay.addWidget(message)
             lay.addWidget(
                 grey(
-                    "When a channel gets here, the message pops up, with Continue, and stays in the orange bar "
-                    "until you continue.",
+                    "When a channel gets here, the message shows in the orange bar at the top until you "
+                    "press Continue.",
                     11,
                 )
             )

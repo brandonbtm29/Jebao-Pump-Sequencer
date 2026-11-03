@@ -12,7 +12,7 @@ Kinds (shown with the names in ``LABELS``):
 - ``staccato``: pump ``volume`` mL in bursts of ``burst`` mL with ``gap`` s between them.
 - ``wait``: a timer of ``seconds``.
 - ``review``: wait until someone presses Continue ("Wait for me"), showing ``message``
-  (what to do there, e.g. a setup change) in a pop-up and the orange bar.
+  (what to do there, e.g. a setup change) in the orange bar.
 - ``sync``: the lanes wait for each other, and for what they started in the background.
 - ``sequence``: run the saved sequence ``name``.
 

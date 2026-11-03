@@ -40,7 +40,7 @@ from calibration_tab import CalibrationTab
 from discord_dialog import DiscordDialog
 from network_report import NetworkDialog
 from rack_widgets import ManualTab, RackTab
-from sequencer_tab import ReviewPopup, SequencerTab
+from sequencer_tab import SequencerTab
 
 APP_DIR = settings_location.app_folder(script_dir)
 CONFIG_DIR = settings_location.resolve(APP_DIR, DATA_DIR)
@@ -838,7 +838,6 @@ class JebaoPumpGUI(QMainWindow):
         self._ch_review_titles = {}  # lane -> what the waiting step is, for the banner
         self._ch_review_messages = {}  # lane -> the waiting step's message (what to do there)
         self._review_at = {}  # lane -> path of the Wait for me step it waits at
-        self._review_popups = {}  # step path -> ReviewPopup showing that step's message
         self._run_one = False  # start the next queued run even though the queue is paused
         self._told_calibration = False
         self._motor_jobs = 0  # manual doses and calibration runs in progress
@@ -2279,9 +2278,6 @@ class JebaoPumpGUI(QMainWindow):
             self._ch_review_titles = {}
             self._ch_review_messages = {}
             self._review_at = {}
-            for popup in list(self._review_popups.values()):
-                popup.done(0)
-            self._review_popups = {}
             self.refresh_approval_banner()
             run.finish(outcome, why)
             self._log_outcome(run)
@@ -2405,8 +2401,7 @@ class JebaoPumpGUI(QMainWindow):
             ls.detail = message
             self.refresh_approval_banner()
             self._tell_discord(self._notify_review, ch, item, message)
-            if message:
-                self._show_review_popup(item)
+            QApplication.alert(self)  # flashes the taskbar button / bounces the Dock icon
             if step.get("sound"):
                 QApplication.beep()
             said = f" Message: {message}" if message else ""
@@ -2421,7 +2416,6 @@ class JebaoPumpGUI(QMainWindow):
                 self._ch_review_titles.pop(ch, None)
                 self._ch_review_messages.pop(ch, None)
                 self._review_at.pop(ch, None)
-                self._review_popup_done(ch, item.path)
                 self.refresh_approval_banner()
             logger.info(f"[{where}] Continued.")
         elif kind == "sync":
@@ -2441,36 +2435,6 @@ class JebaoPumpGUI(QMainWindow):
                 raise RuntimeError(f"{sequence.title(step)}: {problem}, so the run stops here")
             heads = [key for key in sequence.heads_of(step) if self._lane_for(key) == ch]
             await self._together([self._run_head(ch, item, run, key, background) for key in heads])
-
-    def _show_review_popup(self, item):
-        """Pop up a Wait for me step's message, once for all the channels waiting at it."""
-        popup = self._review_popups.get(item.path)
-        if popup is None:
-            popup = ReviewPopup(
-                self,
-                name=self.current_running_sequence or "",
-                step_number=item.top + 1,
-                title=sequence.title(item.step),
-                message=item.step.get("message", ""),
-            )
-            self._review_popups[item.path] = popup
-            popup.finished.connect(lambda _r, path=item.path, p=popup: self._review_popup_closed(path, p))
-        for ch, path in self._review_at.items():
-            if path == item.path:
-                popup.add_lane(ch)
-        popup.show()
-        popup.raise_()
-        popup.activateWindow()
-        QApplication.alert(self)  # flashes the taskbar button / bounces the Dock icon
-
-    def _review_popup_closed(self, path, popup):
-        if self._review_popups.get(path) is popup:
-            del self._review_popups[path]
-
-    def _review_popup_done(self, ch, path):
-        popup = self._review_popups.get(path)
-        if popup is not None:
-            popup.remove_lane(ch)
 
     async def _run_head(self, lane, item, run, key, background=False):
         """One head's part of a dose or staccato step, in ``lane`` (its CH number).
