@@ -377,3 +377,78 @@ def test_a_review_on_stack_b_only_stops_stack_b():
     ]
     flat, _ = sq.flatten(steps, c)
     assert [(f.top, f.lanes) for f in flat] == [(0, (1, 5)), (1, (5,)), (2, (1, 5))]
+
+
+# --- checks, set per sequence -----------------------------------------------------------------
+
+
+def test_check_settings_defaults_and_odd_values():
+    assert sq.checks_settings(None) == sq.DEFAULT_CHECKS
+    odd = sq.checks_settings({"same_channel": "maybe", "offline": "stop", "calibration_days": "9e9"})
+    assert odd["same_channel"] == "stop" and odd["offline"] == "stop"
+    assert odd["calibration_days"] == sq.MAX_CALIBRATION_DAYS
+    assert sq.checks_settings({"calibration_days": -3})["calibration_days"] == 1
+    assert sq.checks_settings({"calibration_days": "x"})["calibration_days"] == sq.STALE_DAYS
+
+
+def same_channel_checks(p):
+    return [(c.level, c.text) for c in p.checks if "into CH" in c.text]
+
+
+def test_two_heads_into_one_channel_at_once_are_caught():
+    steps = [dose([["A", 1], ["B", 1]], ml=1)]  # JP 1 · CH1 and JP 2 · CH1: both CH1
+    c = ctx(rates={"A": 1.0, "B": 1.0})
+    stop = same_channel_checks(sq.plan(steps, c))
+    assert stop == [
+        (
+            "error",
+            "Step 1: JP 1 · CH1 and JP 2 · CH1 would pump into CH1 at the same time. The run stops "
+            "there (Checks: one head at a time per channel).",
+        )
+    ]
+    warn = same_channel_checks(sq.plan(steps, c, checks={"same_channel": "warn"}))
+    assert [lvl for lvl, _t in warn] == ["warn"] and "The run stops" not in warn[0][1]
+    assert same_channel_checks(sq.plan(steps, c, checks={"same_channel": "off"})) == []
+
+
+def test_one_after_the_other_or_other_channels_is_fine():
+    c = ctx(rates={"A": 1.0, "B": 1.0})
+    after = [dose([["A", 1]], ml=1), dose([["B", 1]], ml=1)]  # CH1, one after the other
+    assert same_channel_checks(sq.plan(after, c)) == []
+    other = [dose([["A", 1], ["B", 2]], ml=1)]  # CH1 and CH2 side by side
+    assert same_channel_checks(sq.plan(other, c)) == []
+    stacks = [dose([["A", 1], ["B", 1]], ml=1)]  # Stack A CH1 and Stack B CH5
+    assert same_channel_checks(sq.plan(stacks, two_stacks(rates={"A": 1.0, "B": 1.0}))) == []
+
+
+def test_a_background_step_still_pumping_into_the_channel_is_caught():
+    steps = [dose([["A", 1]], ml=5, background=True), dose([["B", 1]], ml=1)]
+    found = same_channel_checks(sq.plan(steps, ctx(rates={"A": 1.0, "B": 1.0})))
+    assert len(found) == 1 and found[0][0] == "error"
+    assert found[0][1].startswith(
+        "Step 2: JP 2 · CH1 would pump into CH1 while JP 1 · CH1 (step 1) still does."
+    )
+
+
+def test_offline_and_calibration_checks_follow_the_settings():
+    steps = [dose([["A", 1]], ml=1), dose([["C", 2]], ml=1)]
+    c = ctx(
+        rates={"A": 2.0, "C": 2.0},
+        online={"C": False},
+        dates={("A", 1): "2026-10-20", ("C", 2): "2026-10-29"},
+        known=lambda did: True,
+    )
+
+    def levels(**checks):
+        out = {}
+        for check in sq.plan(steps, c, checks=checks).checks:
+            if "offline" in check.text:
+                out["offline"] = check.level
+            if "calibrated" in check.text:
+                out["calibration"] = check.level
+        return out
+
+    assert levels() == {"offline": "warn"}  # A is 10 days old: fine under 30 days
+    assert levels(offline="stop", calibration_days=5) == {"offline": "error", "calibration": "warn"}
+    assert levels(calibration="stop", calibration_days=5)["calibration"] == "error"
+    assert "calibration" not in levels(calibration="off", calibration_days=5)

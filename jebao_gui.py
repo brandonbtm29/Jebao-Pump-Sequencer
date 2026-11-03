@@ -135,6 +135,10 @@ class HeadRun:
         return max(0.0, min(1.0, 1.0 - self.remaining / self.duration))
 
 
+class ChannelBusy(RuntimeError):
+    """A head may not turn on: another head is pumping into the same channel (CH number)."""
+
+
 class _LogBridge(QObject):
     """Carries log lines to the GUI thread. A Qt signal emitted from a background
     thread is delivered on the thread this object lives in (the GUI thread)."""
@@ -744,6 +748,14 @@ class SettingsDialog(QDialog):
         limit_row.addStretch(1)
         layout.addRow(self.chk_limit)
         layout.addRow("On-time limit:", limit_row)
+        self.chk_one_per_channel = QCheckBox("Manual tab: one head at a time in each channel")
+        self.chk_one_per_channel.setChecked(bool(guard.get("one_per_channel", True)))
+        self.chk_one_per_channel.setToolTip(
+            "A dose isn't started on a head while another head is pumping into the same channel (the "
+            "same CH number, e.g. JP 1 · CH1 and JP 2 · CH1). Sequences have their own setting: "
+            "Checks… in the Sequencer."
+        )
+        layout.addRow(self.chk_one_per_channel)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -778,6 +790,7 @@ class SettingsDialog(QDialog):
             "enabled": self.chk_limit.isChecked(),
             "on_min": min(self.spin_limit_on.value(), self.spin_limit_window.value()),
             "window_min": self.spin_limit_window.value(),
+            "one_per_channel": self.chk_one_per_channel.isChecked(),
         }
         self.config.save()
         eventlog.prune(eventlog.log_dir(DATA_DIR), self.log_days_spin.value())
@@ -869,6 +882,8 @@ class JebaoPumpGUI(QMainWindow):
         self._groups_key = None
         self._groups = {}
         self._run_lane_of = {}  # (did, ch) -> lane, fixed when a run starts
+        self._run_checks = sequence.checks_settings()  # the running sequence's checks
+        self._claims = set()  # heads whose ON is on its way (one head per channel)
 
         # Discord notifications (discord_notify.py): sent from their own thread
         self.discord = discord_notify.Notifier()
@@ -2017,16 +2032,20 @@ class JebaoPumpGUI(QMainWindow):
             all_lanes=self.all_lanes,
         )
 
-    def plan_sequence(self, steps, name=None, with_limit=True):
-        return sequence.plan(steps, self.plan_context(), name=name, with_limit=with_limit)
+    def plan_sequence(self, steps, name=None, with_limit=True, checks=None):
+        return sequence.plan(steps, self.plan_context(), name=name, with_limit=with_limit, checks=checks)
 
-    def enqueue(self, name, steps, front=False):
-        """Add a sequence to the queue (``front``: next). False if it has no steps."""
+    def enqueue(self, name, steps, front=False, checks=None):
+        """Add a sequence to the queue (``front``: next) with its checks. False if it has no steps."""
         steps = sequence.normalize_all(steps)
         if not steps:
             logger.warning("Nothing to run: the sequence has no steps.")
             return False
-        item = {"name": name or "Untitled sequence", "data": sequence.to_saved_all(steps)}
+        item = {
+            "name": name or "Untitled sequence",
+            "data": sequence.to_saved_all(steps),
+            "checks": sequence.checks_settings(checks),
+        }
         if front:
             self.sequence_queue.insert(0, item)
         else:
@@ -2155,7 +2174,7 @@ class JebaoPumpGUI(QMainWindow):
         try:
             self.refresh_queue_ui()
             self.sequence_task = asyncio.create_task(
-                self._async_run_sequence(seq_name, seq_item.get("data") or [])
+                self._async_run_sequence(seq_name, seq_item.get("data") or [], checks=seq_item.get("checks"))
             )
             outcome = await self.sequence_task
         except asyncio.CancelledError:
@@ -2197,7 +2216,7 @@ class JebaoPumpGUI(QMainWindow):
         if tab is not None:
             tab.refresh_queue()
 
-    async def _async_run_sequence(self, seq_name, seq_data, call_stack=None):
+    async def _async_run_sequence(self, seq_name, seq_data, call_stack=None, checks=None):
         """Run a sequence: each lane (CH1–CH4) goes through its own steps, side by side.
 
         Returns "done", "failed" (a step failed, e.g. a pump wouldn't turn on, and the rest
@@ -2206,7 +2225,8 @@ class JebaoPumpGUI(QMainWindow):
         goes into the run history.
         """
         steps = sequence.normalize_all(seq_data)
-        plan = self.plan_sequence(steps, name=seq_name)
+        self._run_checks = sequence.checks_settings(checks)
+        plan = self.plan_sequence(steps, name=seq_name, checks=self._run_checks)
         run = sequence.RunState(seq_name, steps, plan.flat, plan=plan)
         self.seq_run = run
         lanes = sorted({ch for item in plan.flat for ch in item.lanes})
@@ -2595,7 +2615,7 @@ class JebaoPumpGUI(QMainWindow):
                     logger.info(f"[{self.head_label(pump_did, ch)}] Resuming ({run.remaining:.1f} s left).")
                     if self.guard.over_limit(run.key):
                         continue  # rest first; it turns on again after
-                    await self._turn_on(pump_did, ch)
+                    await self._turn_on(pump_did, ch, source)
 
                 if self.guard.over_limit(run.key):
                     await self._rest_head(run, by_channel)
@@ -2642,7 +2662,7 @@ class JebaoPumpGUI(QMainWindow):
         if run.paused or (by_channel and self._ch_paused.get(lane, False)):
             return  # paused while resting: it turns on again when resumed
         logger.info(f"[{label}] Rested; carrying on ({run.remaining / 60:.1f} min of pumping left).")
-        await self._turn_on(did, ch)
+        await self._turn_on(did, ch, run.source)
 
     # --- Manual dispensing on several heads at once --------------------------------------
 
@@ -2687,16 +2707,27 @@ class JebaoPumpGUI(QMainWindow):
             except ValueError as e:
                 logger.warning(f"{e} Skipped.")
                 continue
+            try:
+                self._check_channel((did, ch), "manual")
+            except ChannelBusy as e:
+                logger.warning(f"{e}. Skipped.")
+                continue
+            self._claims.add((did, ch))  # until its ON has gone out (one head per channel)
             plan.setdefault(did, []).append((ch, seconds))
         tasks = []
         for did, items in plan.items():
             task = self._start_task(
                 lambda did=did, items=items: self._manual_pump_dispense(did, items, value, unit)
             )
+            keys = [(did, ch) for ch, _s in items]
             if task is not None:
                 tasks.append(task)
                 self._dose_tasks.add(task)
                 task.add_done_callback(self._dose_tasks.discard)
+                # also if it's cancelled before it starts (Emergency Stop)
+                task.add_done_callback(lambda _t, keys=keys: self._claims.difference_update(keys))
+            else:
+                self._claims.difference_update(keys)
         return tasks
 
     async def _manual_pump_dispense(self, did, items, value, unit):
@@ -2705,7 +2736,10 @@ class JebaoPumpGUI(QMainWindow):
         try:
             what = f"{value:g} mL" if unit == "volume" else f"{value:g} s"
             start_now = {f"channe{ch}": True for ch, _ in items if not self.guard.over_limit((did, ch))}
-            ok = await self.send_cloud_command(did, start_now) if start_now else True
+            try:
+                ok = await self.send_cloud_command(did, start_now) if start_now else True
+            finally:
+                self._claims.difference_update((did, ch) for ch, _s in items)
             if not ok:
                 logger.error(
                     f"Couldn't start {self.get_device_name(did)}; nothing was dispensed there "
@@ -2769,21 +2803,94 @@ class JebaoPumpGUI(QMainWindow):
         channel_key = f"channe{ch}"
         try:
             if not self.guard.over_limit((did, ch)):  # over it: the run rests first, then turns on
-                await self._turn_on(did, ch)
+                await self._turn_on(did, ch, source)
             await self._interruptible_motor_run(ch, did, seconds, source, meter=meter, lane=lane)
         finally:
             await self.send_cloud_command(did, {channel_key: False})
 
-    async def _turn_on(self, did, ch):
+    # --- one head at a time per channel (CH number) ----------------------------------------
+
+    def one_per_channel_manual(self):
+        """Settings → Pump safety: the Manual tab starts one head at a time per channel."""
+        return bool((self.config.data.get("guard") or {}).get("one_per_channel", True))
+
+    def _channel_rule(self, source):
+        """ "stop", "warn" or "off" for a head started by ``source``: a sequence follows its
+        checks, the Manual tab the Pump safety setting, and calibration isn't checked."""
+        if source == "sequence":
+            return self._run_checks.get("same_channel", "stop")
+        if source == "manual":
+            return "stop" if self.one_per_channel_manual() else "off"
+        return "off"
+
+    def _channel_user(self, key):
+        """Another head that is (or may be) pumping into ``key``'s channel now, or None.
+        A head counts while it's on, its ON is on its way, or its OFF hasn't gone through."""
+        g = self.guard
+        maybe = set(self._claims) | set(g.must_off)
+        maybe |= {k for k, on in g.app_on.items() if on}
+        maybe |= {k for k, on in g._in_flight.items() if on}
+        maybe |= {k for k, (_t, why) in g.unconfirmed.items() if why.startswith("pump offline")}
+        maybe |= {k for k in self.head_runs if (self.run_state(*k) or ("",))[0] == "running"}
+        number = self.channel_number(*key)
+        for other in sorted(maybe, key=str):
+            if other != key and self.channel_number(*other) == number:
+                return other
+        return None
+
+    def _check_channel(self, key, source):
+        rule = self._channel_rule(source)
+        other = self._channel_user(key) if rule != "off" else None
+        if other is None:
+            return
+        label, busy = self.head_label(*key), self.head_label(*other)
+        number = self.channel_number(*key)
+        if rule == "warn":
+            logger.warning(f"[{label}] {busy} is pumping into CH{number} too (this sequence allows it).")
+            return
+        why = "this sequence's checks" if source == "sequence" else "Settings → Pump safety"
+        raise ChannelBusy(
+            f"{label} didn't start: {busy} is already pumping into CH{number}, and {why} allow one "
+            "head at a time per channel"
+        )
+
+    def channel_problems(self, heads):
+        """For the Manual tab: why some of ``heads`` may not start now (one head per channel)."""
+        if self._channel_rule("manual") != "stop":
+            return []
+        problems, chosen = [], {}
+        for key in heads:
+            if key in self.head_runs:
+                continue  # running already: skipped anyway
+            number = self.channel_number(*key)
+            other = self._channel_user(key)
+            if other is not None:
+                problems.append(f"{self.head_label(*other)} is already pumping into CH{number}.")
+            elif number in chosen:
+                problems.append(
+                    f"{self.head_label(*chosen[number])} and {self.head_label(*key)} both pump into CH{number}."
+                )
+            else:
+                chosen[number] = key
+        return problems
+
+    async def _turn_on(self, did, ch, source="sequence"):
         """Turn a head on for a dose, retrying a little. If it won't, the dose stops with an
-        error instead of counting down as if it were pumping."""
-        for wait in (0, 2, 5):
-            if wait:
-                await asyncio.sleep(wait)
-            if await self.send_cloud_command(did, {f"channe{ch}": True}):
-                return
-            if time.time() < self.guard.hold_until:
-                break  # Emergency Stop: don't keep trying
+        error instead of counting down as if it were pumping. Raises ``ChannelBusy`` if
+        another head is pumping into the same channel and that isn't allowed."""
+        key = (did, ch)
+        self._check_channel(key, source)
+        self._claims.add(key)
+        try:
+            for wait in (0, 2, 5):
+                if wait:
+                    await asyncio.sleep(wait)
+                if await self.send_cloud_command(did, {f"channe{ch}": True}):
+                    return
+                if time.time() < self.guard.hold_until:
+                    break  # Emergency Stop: don't keep trying
+        finally:
+            self._claims.discard(key)
         message = (
             f"Couldn't turn {self.head_label(did, ch)} on (cloud or Wi-Fi problem), so this dose "
             "was stopped rather than counted as delivered."

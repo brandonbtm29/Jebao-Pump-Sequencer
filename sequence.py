@@ -68,6 +68,18 @@ MAX_BURSTS = 5000  # a staccato step may have at most this many bursts
 SIM_LIMIT = 8000  # pumping runs worked out with the on-time limit before a plan stops counting rests
 DEFAULT_RATE = 1.0  # what a pump that was never calibrated has (ConfigManager.get_pump)
 
+# --- checks, set per sequence (the Checks… button) ----------------------------------------
+# Each is "off", "warn" (shown in Before you run) or "stop" (an error: the app asks "Run
+# anyway?", and for same_channel the run also stops if it happens).
+CHECK_LEVELS = ("off", "warn", "stop")
+DEFAULT_CHECKS = {
+    "same_channel": "stop",  # two heads pumping into the same channel (CH number) at once
+    "offline": "warn",  # a pump the sequence uses is offline
+    "calibration": "warn",  # a head never calibrated, or longer ago than calibration_days
+    "calibration_days": STALE_DAYS,
+}
+MAX_CALIBRATION_DAYS = 3650
+
 # 2.6 and older: action name -> (kind, background)
 _LEGACY = {
     "Dose": ("dose", False),
@@ -747,9 +759,49 @@ def _pump_with_limit(budget, key, t, seconds, limit):
     return t, out
 
 
-def plan(steps, ctx, name=None, with_limit=True):
-    """Work out what a run of ``steps`` will do, without sending anything to the pumps."""
+def checks_settings(saved=None):
+    """A sequence's checks with the defaults filled in and odd values fixed."""
+    saved = saved if isinstance(saved, dict) else {}
+    out = dict(DEFAULT_CHECKS)
+    for key in ("same_channel", "offline", "calibration"):
+        if saved.get(key) in CHECK_LEVELS:
+            out[key] = saved[key]
+    try:
+        days = float(saved.get("calibration_days", STALE_DAYS))
+    except (TypeError, ValueError, OverflowError):
+        days = STALE_DAYS
+    days = days if math.isfinite(days) else STALE_DAYS
+    out["calibration_days"] = int(min(max(round(days), 1), MAX_CALIBRATION_DAYS))
+    return out
+
+
+def _level(setting):
+    return {"stop": "error", "warn": "warn"}.get(setting)
+
+
+def same_channel_overlaps(pumping):
+    """Heads pumping into the same channel at the same time, from the plan's pumping spans
+    ({lane: [(start, end, head, top)]}). Returns [(lane, (head, top), (head, top))], the
+    earlier one first, once per pair of heads in a lane."""
+    found, seen = [], set()
+    for lane in sorted(pumping):
+        active = []
+        for start, end, key, top in sorted(pumping[lane], key=lambda s: (s[0], s[3], s[1])):
+            active = [a for a in active if a[0] > start + 0.05]
+            for _end, other, other_top in active:
+                pair = (lane, frozenset((key, other)))
+                if other != key and pair not in seen:
+                    seen.add(pair)
+                    found.append((lane, (other, other_top), (key, top)))
+            active.append((end, key, top))
+    return found
+
+
+def plan(steps, ctx, name=None, with_limit=True, checks=None):
+    """Work out what a run of ``steps`` will do, without sending anything to the pumps.
+    ``checks`` are the sequence's checks (``checks_settings``)."""
     steps = normalize_all(steps)
+    checks = checks_settings(checks)
     p = Plan()
     flat, p.checks = flatten(steps, ctx, name)
     p.flat = flat
@@ -761,6 +813,7 @@ def plan(steps, ctx, name=None, with_limit=True):
     for ln in every:
         p.lanes[ln] = []
     head_busy = {}  # (did, ch) -> until when a background step uses it
+    pumping = {}  # lane -> [(start, end, head, top)]: when each head pumps, for same_channel
     bg_span = {}  # top -> how long its background run takes
     work = [0]  # pumping runs worked out so far
     head_rest = {}  # (top, head) -> how long that head rests in that step
@@ -851,6 +904,7 @@ def plan(steps, ctx, name=None, with_limit=True):
                         hp.volume_ml += seconds * rate / 60.0
                     else:
                         hp.volume_known = False
+                pumping.setdefault(lane, []).extend((a, b, key, top) for k, a, b in segs if k == "pump")
                 rest = sum(b - a for k, a, b in segs if k == "rest")
                 hp.rest_s += rest
                 head_rest[(top, key)] = head_rest.get((top, key), 0.0) + rest
@@ -881,12 +935,26 @@ def plan(steps, ctx, name=None, with_limit=True):
     for hp in p.heads.values():
         if hp.volume_known:
             p.liquids[hp.liquid] = p.liquids.get(hp.liquid, 0.0) + hp.volume_ml
-    _check(steps, flat, p, ctx, with_limit)
+    _check(steps, flat, p, ctx, with_limit, checks)
+    level = _level(checks["same_channel"])
+    if level:
+        for lane, (first, top1), (second, top2) in same_channel_overlaps(pumping):
+            a, b = ctx.label(*first), ctx.label(*second)
+            if top1 == top2:
+                text = f"Step {top2 + 1}: {a} and {b} would pump into CH{lane} at the same time."
+            else:
+                text = (
+                    f"Step {top2 + 1}: {b} would pump into CH{lane} while {a} (step {top1 + 1}) still does."
+                )
+            if level == "error":
+                text += " The run stops there (Checks: one head at a time per channel)."
+            p.checks.append(Check(level, text, top2))
     return p
 
 
-def _check(steps, flat, p, ctx, with_limit):
+def _check(steps, flat, p, ctx, with_limit, settings=None):
     """The "Before you run" list."""
+    settings = checks_settings(settings)
     checks = p.checks
     if not steps:
         checks.insert(0, Check("error", "There are no steps yet. Add one below."))
@@ -947,29 +1015,34 @@ def _check(steps, flat, p, ctx, with_limit):
         if not rate or rate <= 0:
             level = "error" if needs_rate else "warn"
             checks.append(Check(level, f"Step {top + 1}: {label} has no flow rate. Calibrate it first.", top))
-        elif not when and abs(rate - DEFAULT_RATE) < 1e-9 and needs_rate:
+        elif not when and abs(rate - DEFAULT_RATE) < 1e-9 and needs_rate and _level(settings["calibration"]):
             checks.append(
                 Check(
-                    "warn",
+                    _level(settings["calibration"]),
                     f"Step {top + 1}: {label} looks uncalibrated (still the default 1 mL/min).",
                     top,
                 )
             )
-        elif when and needs_rate:
+        elif when and needs_rate and _level(settings["calibration"]):
             try:
                 age = (ctx.today - date.fromisoformat(str(when))).days
             except ValueError:
                 age = None
-            if age is not None and age > STALE_DAYS:
+            if age is not None and age > settings["calibration_days"]:
                 checks.append(
-                    Check("warn", f"Step {top + 1}: {label} was last calibrated {age} days ago.", top)
+                    Check(
+                        _level(settings["calibration"]),
+                        f"Step {top + 1}: {label} was last calibrated {age} days ago.",
+                        top,
+                    )
                 )
     for did in sorted(unknown_pumps, key=str):
         checks.append(Check("error", f"{ctx.pump_name(did)} isn't on your Jebao account (any more)."))
-    for did in sorted(offline, key=str):
+    for did in sorted(offline, key=str) if _level(settings["offline"]) else ():
         checks.append(
             Check(
-                "warn", f"{ctx.pump_name(did)} is offline right now. Its steps will fail if it stays offline."
+                _level(settings["offline"]),
+                f"{ctx.pump_name(did)} is offline right now. Its steps will fail if it stays offline.",
             )
         )
     rested = [top for top, s in p.step_rest_s.items() if s > 0.5]

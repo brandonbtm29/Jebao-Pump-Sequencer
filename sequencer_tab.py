@@ -47,6 +47,8 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -677,6 +679,96 @@ class StatCard(QFrame):
         self.extra = lay
 
 
+class ChecksDialog(QDialog):
+    """A sequence's checks: what "Before you run" checks for it, and how strictly."""
+
+    CHOICES = {
+        "same_channel": [
+            ("stop", "Stop the run"),
+            ("warn", "Warn"),
+            ("off", "Allow it"),
+        ],
+        "offline": [("stop", "Ask before running"), ("warn", "Warn")],
+        "calibration": [("stop", "Ask before running"), ("warn", "Warn"), ("off", "Don't check")],
+    }
+
+    def __init__(self, name, checks, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Checks · {name}")
+        self.setMinimumWidth(520)
+        checks = sq.checks_settings(checks)
+        lay = QVBoxLayout(self)
+        intro = QLabel(
+            f"What “Before you run” checks for “{name}”. A check set to stop or ask marks the "
+            "problem in red, and Run now and Add to queue ask “Run anyway?” first."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        grid = QGridLayout()
+        self.combos = {}
+
+        def row(r, key, text, note):
+            label = QLabel(f"<b>{text}</b>")
+            label.setWordWrap(True)
+            combo = QComboBox()
+            for value, shown in self.CHOICES[key]:
+                combo.addItem(shown, value)
+            combo.setCurrentIndex(max(0, combo.findData(checks[key])))
+            combo.setAccessibleName(text)
+            grid.addWidget(label, r, 0)
+            grid.addWidget(combo, r, 1)
+            explain = grey(note, 12)
+            explain.setWordWrap(True)
+            grid.addWidget(explain, r + 1, 0, 1, 2)
+            self.combos[key] = combo
+
+        row(
+            0,
+            "same_channel",
+            "Two heads pumping into the same channel at once",
+            "For example JP 1 · CH1 and JP 2 · CH1, both into column 1. Stop the run asks before it "
+            "starts, and also stops a run that gets there anyway (say, because of a dose started in "
+            "the Manual tab).",
+        )
+        row(2, "offline", "A pump this sequence uses is offline", "Its steps fail if it stays offline.")
+        row(
+            4,
+            "calibration",
+            "A head calibrated too long ago, or never",
+            "Too long ago is older than the number of days below.",
+        )
+        self.spin_days = QSpinBox()
+        self.spin_days.setRange(1, sq.MAX_CALIBRATION_DAYS)
+        self.spin_days.setSuffix(" days")
+        self.spin_days.setValue(checks["calibration_days"])
+        self.spin_days.setAccessibleName("Calibration may be this old")
+        days = QHBoxLayout()
+        days.addWidget(QLabel("Calibrations may be up to"))
+        days.addWidget(self.spin_days)
+        days.addWidget(QLabel("old"))
+        days.addStretch(1)
+        grid.addLayout(days, 6, 0, 1, 2)
+        self.combos["calibration"].currentIndexChanged.connect(
+            lambda _i: self.spin_days.setEnabled(self.combos["calibration"].currentData() != "off")
+        )
+        self.spin_days.setEnabled(checks["calibration"] != "off")
+        grid.setColumnStretch(0, 1)
+        lay.addLayout(grid)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        width = 560
+        self.resize(width, max(self.sizeHint().height(), lay.totalHeightForWidth(width)))
+
+    def values(self):
+        out = {key: combo.currentData() for key, combo in self.combos.items()}
+        out["calibration_days"] = self.spin_days.value()
+        return sq.checks_settings(out)
+
+
 class LaneCard(QFrame):
     """One lane in the Running view: what it is doing, with pause, skip and Continue."""
 
@@ -888,6 +980,14 @@ class SequencerTab(QWidget):
     def _library(self):
         return self.host.config.data.setdefault("saved_sequences", {})
 
+    def _checks_library(self):
+        """Each saved sequence's checks, by name (kept apart from its steps, so older versions
+        of the app still read the saved sequences)."""
+        return self.host.config.data.setdefault("saved_sequence_checks", {})
+
+    def saved_checks(self, name):
+        return sq.checks_settings(self._checks_library().get(name))
+
     def _load_draft(self):
         cfg = self.host.config.data
         try:
@@ -907,6 +1007,7 @@ class SequencerTab(QWidget):
                     self.source = self.name = name
                     break
         self.name = self.name or self.source or UNTITLED
+        self.checks = sq.checks_settings(cfg.get("sequence_checks"))
 
     def save_draft(self):
         """Keep the sequence being edited in the settings, so it is there next time."""
@@ -915,16 +1016,21 @@ class SequencerTab(QWidget):
         cfg["sequence"] = sq.to_saved_all(self.steps)
         cfg["sequence_name"] = self.name
         cfg["sequence_source"] = self.source
+        cfg["sequence_checks"] = dict(self.checks)
         self.host.config.save()
 
     def is_unsaved(self):
         saved = self._library().get(self.source) if self.source else None
         if saved is None:
             return bool(self.steps)
-        return self.name != self.source or not sq.same_steps(saved, self.steps)
+        return (
+            self.name != self.source
+            or not sq.same_steps(saved, self.steps)
+            or self.checks != self.saved_checks(self.source)
+        )
 
     def _snapshot(self):
-        return (self.name, copy.deepcopy(self.steps))
+        return (self.name, copy.deepcopy(self.steps), dict(self.checks))
 
     def _before_change(self, key=None):
         """Remember the state for Undo. Quick edits of the same thing (typing a number) are one step."""
@@ -951,7 +1057,7 @@ class SequencerTab(QWidget):
         if not self.undo_stack:
             return
         self.redo_stack.append(self._snapshot())
-        self.name, self.steps = self.undo_stack.pop()
+        self.name, self.steps, self.checks = self.undo_stack.pop()
         self._last_key = None
         self.name_edit.setText(self.name)
         self._changed(structure=True, select=self._selected_rows() or [0], inspector=True)
@@ -960,7 +1066,7 @@ class SequencerTab(QWidget):
         if not self.redo_stack:
             return
         self.undo_stack.append(self._snapshot())
-        self.name, self.steps = self.redo_stack.pop()
+        self.name, self.steps, self.checks = self.redo_stack.pop()
         self._last_key = None
         self.name_edit.setText(self.name)
         self._changed(structure=True, select=self._selected_rows() or [0], inspector=True)
@@ -985,8 +1091,9 @@ class SequencerTab(QWidget):
             return self.save()
         return True
 
-    def _set_draft(self, name, steps, source):
+    def _set_draft(self, name, steps, source, checks=None):
         self.name, self.steps, self.source = name, sq.normalize_all(steps), source
+        self.checks = sq.checks_settings(checks)
         self.undo_stack.clear()
         self.redo_stack.clear()
         self._last_key = None
@@ -1001,7 +1108,7 @@ class SequencerTab(QWidget):
         if not self._confirm_leave():
             self.refresh_library()
             return
-        self._set_draft(name, lib[name], name)
+        self._set_draft(name, lib[name], name, self.saved_checks(name))
         self.show_page(0)
 
     def new_sequence(self):
@@ -1020,6 +1127,7 @@ class SequencerTab(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return False
         lib[name] = sq.to_saved_all(self.steps)
+        self._checks_library()[name] = dict(self.checks)
         self.name = self.source = name
         self.name_edit.setText(name)
         self.save_draft()
@@ -1027,6 +1135,14 @@ class SequencerTab(QWidget):
         self.refresh_library()
         logger.info(f"Saved the sequence “{name}” ({len(self.steps)} steps).")
         return True
+
+    def edit_checks(self):
+        dlg = ChecksDialog(self.name, self.checks, self)
+        if dlg.exec() and dlg.values() != self.checks:
+            self._before_change()
+            self.checks = dlg.values()
+            self._changed()
+            self._replan()
 
     def save_as(self):
         name, ok = QInputDialog.getText(self, "Save as", "Name for the copy:", text=f"{self.name} (copy)")
@@ -1168,6 +1284,13 @@ class SequencerTab(QWidget):
         row2 = QHBoxLayout()
         self.meta = grey("", 12)
         row2.addWidget(self.meta, 1)
+        self.btn_checks = QPushButton("Checks…")
+        self.btn_checks.setToolTip(
+            "What Before you run checks for this sequence: two heads in one channel, offline pumps, "
+            "old calibrations."
+        )
+        self.btn_checks.clicked.connect(self.edit_checks)
+        row2.addWidget(self.btn_checks)
         self.btn_preview = QPushButton("Preview timeline")
         self.btn_preview.setToolTip(
             "See what the run will do: times, a timeline per channel and the liquid needed."
@@ -1508,7 +1631,7 @@ class SequencerTab(QWidget):
     def _replan(self):
         self._plan_timer.stop()
         try:
-            self.plan = self.host.plan_sequence(self.steps, name=self.name)
+            self.plan = self.host.plan_sequence(self.steps, name=self.name, checks=self.checks)
         except Exception as e:  # odd saved data must not break the tab
             logger.error(f"Couldn't work out what the sequence will do: {e}")
             self.plan = sq.Plan(
@@ -2127,6 +2250,7 @@ class SequencerTab(QWidget):
             return
         new = self._unique(f"{name} (copy)")
         self._library()[new] = copy.deepcopy(self._library()[name])
+        self._checks_library()[new] = self.saved_checks(name)
         self.host.config.save()
         self.refresh_library()
         logger.info(f"Copied the sequence “{name}” as “{new}”.")
@@ -2144,6 +2268,9 @@ class SequencerTab(QWidget):
             QMessageBox.warning(self, "Rename sequence", f"There's already a sequence called “{new}”.")
             return
         lib[new] = lib.pop(old)
+        checks = self._checks_library()
+        if old in checks:
+            checks[new] = checks.pop(old)
         for steps in lib.values():  # sequences that run it keep working
             for s in steps:
                 if s.get("kind") == "sequence" and s.get("name") == old:
@@ -2174,6 +2301,7 @@ class SequencerTab(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._library().pop(name, None)
+        self._checks_library().pop(name, None)
         if self.source == name:
             self.source = None
         self.save_draft()
@@ -2184,13 +2312,20 @@ class SequencerTab(QWidget):
     def export_sequence(self):
         name = self._library_selected()
         steps = self._library()[name] if name else sq.to_saved_all(self.steps)
+        checks = self.saved_checks(name) if name else dict(self.checks)
         name = name or self.name
         path, _ = QFileDialog.getSaveFileName(
             self, "Export sequence", f"{name}.jebao-sequence.json", "Sequences (*.json)"
         )
         if not path:
             return
-        data = {"app": "Jebao Pump Sequencer", "kind": "sequence", "name": name, "steps": steps}
+        data = {
+            "app": "Jebao Pump Sequencer",
+            "kind": "sequence",
+            "name": name,
+            "steps": steps,
+            "checks": checks,
+        }
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -2225,6 +2360,7 @@ class SequencerTab(QWidget):
             return None
         name = self._unique(str(data.get("name") or "Imported sequence").strip() or "Imported sequence")
         self._library()[name] = sq.to_saved_all(steps)
+        self._checks_library()[name] = sq.checks_settings(data.get("checks"))
         self.host.config.save()
         self.refresh_library()
         unknown = {did for s in sq.normalize_all(steps) for did, _ch in s["heads"]}
@@ -2255,13 +2391,14 @@ class SequencerTab(QWidget):
     def add_to_queue(self):
         self._replan()
         if self.steps and self._ready_to_run(self.plan, self.name):
-            if self.host.enqueue(self.name, self.steps):
+            if self.host.enqueue(self.name, self.steps, checks=self.checks):
                 logger.info(f"“{self.name}” is in the queue (position {len(self.host.sequence_queue)}).")
 
     def _queue_saved(self, name):
         steps = self._library().get(name)
-        if steps and self._ready_to_run(self.host.plan_sequence(steps, name=name), name):
-            self.host.enqueue(name, steps)
+        checks = self.saved_checks(name)
+        if steps and self._ready_to_run(self.host.plan_sequence(steps, name=name, checks=checks), name):
+            self.host.enqueue(name, steps, checks=checks)
 
     def run_now(self):
         self._replan()
@@ -2277,7 +2414,7 @@ class SequencerTab(QWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        if self.host.enqueue(self.name, self.steps, front=True):
+        if self.host.enqueue(self.name, self.steps, front=True, checks=self.checks):
             self.host.run_next_now()  # even if the queue is paused; the rest stay paused
             if not busy:
                 self.show_page(2)
@@ -2464,7 +2601,9 @@ class SequencerTab(QWidget):
         plan = self.plan
         if self._plan_nolimit is None:
             try:
-                self._plan_nolimit = self.host.plan_sequence(self.steps, name=self.name, with_limit=False)
+                self._plan_nolimit = self.host.plan_sequence(
+                    self.steps, name=self.name, with_limit=False, checks=self.checks
+                )
             except Exception:
                 self._plan_nolimit = plan
         free = self._plan_nolimit

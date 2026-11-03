@@ -266,3 +266,85 @@ def test_wait_for_me_message_is_edited_in_the_settings(tab):
     assert "Swap the sample line to tube 2." in card["where"]
     tab.show_page(1)
     assert "Swap the sample line" in tab.card_needed.note.text()
+
+
+def select_saved(tab, name):
+    for r in range(tab.library.count()):
+        if tab.library.item(r).data(Qt.ItemDataRole.UserRole) == name:
+            tab.library.setCurrentRow(r)
+
+
+def test_each_sequence_keeps_its_own_checks(tab, window, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QFileDialog, QInputDialog
+
+    from sequencer_tab import ChecksDialog
+
+    window.config.data["saved_sequence_checks"] = {}
+    tab.add_step("dose")
+    tab._toggle_head(0, "A", 1)
+    assert tab.checks == sq.DEFAULT_CHECKS
+    dlg = ChecksDialog("Mix", tab.checks)
+    dlg.combos["same_channel"].setCurrentIndex(dlg.combos["same_channel"].findData("off"))
+    dlg.spin_days.setValue(7)
+    wanted = dlg.values()
+    assert wanted["same_channel"] == "off" and wanted["calibration_days"] == 7
+    monkeypatch.setattr(ChecksDialog, "exec", lambda self: 1)
+    monkeypatch.setattr(ChecksDialog, "values", lambda self: wanted)
+    tab.edit_checks()
+    assert tab.checks["same_channel"] == "off" and tab.checks["calibration_days"] == 7
+    tab.save_draft()  # (soon after a change, by itself)
+    assert window.config.data["sequence_checks"]["same_channel"] == "off"  # in the draft
+    tab.undo()
+    assert tab.checks == sq.DEFAULT_CHECKS
+    tab.redo()
+    assert tab.save("Mix")
+    assert window.config.data["saved_sequence_checks"]["Mix"]["same_channel"] == "off"
+    assert not tab.is_unsaved()
+    # a new sequence starts from the defaults; opening Mix again brings its checks back
+    tab.new_sequence()
+    assert tab.checks == sq.DEFAULT_CHECKS
+    tab.open_sequence("Mix")
+    assert tab.checks["same_channel"] == "off"
+    # the plan and the queue use them
+    assert not any("into CH" in c.text for c in tab.plan.checks)
+    # rename, duplicate, export and import carry them; delete drops them
+    tab.refresh_library()
+    select_saved(tab, "Mix")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Mix 2", True))
+    tab.rename_saved()
+    checks = window.config.data["saved_sequence_checks"]
+    assert "Mix" not in checks and checks["Mix 2"]["same_channel"] == "off"
+    select_saved(tab, "Mix 2")
+    tab.duplicate_saved()
+    assert checks["Mix 2 (copy)"]["calibration_days"] == 7
+    path = tmp_path / "mix.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(path), ""))
+    select_saved(tab, "Mix 2")
+    tab.export_sequence()
+    assert json.loads(path.read_text(encoding="utf-8"))["checks"]["same_channel"] == "off"
+    name = tab.import_file(str(path))
+    assert checks[name]["same_channel"] == "off"
+    answer(
+        monkeypatch, __import__("PyQt6.QtWidgets", fromlist=["QMessageBox"]).QMessageBox.StandardButton.Yes
+    )
+    select_saved(tab, "Mix 2 (copy)")
+    tab.delete_saved()
+    assert "Mix 2 (copy)" not in checks
+
+
+def test_a_two_heads_check_asks_before_running(tab, window, monkeypatch):
+    asked = []
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.No
+    )
+    tab._set_draft("Mix", [{**sq.new_step("dose", heads=[["A", 1], ["B", 1]]), "volume": 1}], None)
+    window.queue_paused = True
+    tab.add_to_queue()
+    assert asked and "would pump into CH1 at the same time" in asked[0] and window.sequence_queue == []
+    tab.checks = sq.checks_settings({"same_channel": "warn"})
+    tab.add_to_queue()
+    assert window.sequence_queue[-1]["checks"]["same_channel"] == "warn"
+    window.sequence_queue.clear()
+    window.queue_paused = False

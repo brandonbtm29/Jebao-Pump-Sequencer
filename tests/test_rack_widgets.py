@@ -48,8 +48,9 @@ def test_manual_tab_shows_rack_order_then_unplaced(bench):
     assert dids == ["D1", "D2", "D3", "D5", "D4"]  # rack first, then "Not in the rack"
 
 
-def test_select_heads_and_dispense(bench):
+def test_select_heads_and_dispense(bench, monkeypatch):
     window, calls = bench
+    monkeypatch.setattr(window, "channel_problems", lambda heads: [])  # D1 and D2 · CH3 together is fine here
     tab = window.manual_tab
     tile(window, "D2", 3).click()
     tab.toggle_pump("D1")  # "All 4"
@@ -64,6 +65,27 @@ def test_select_heads_and_dispense(bench):
     assert tab.selected == {("D2", 3)}
     tab.clear_selection()
     assert not tab.btn_dispense.isEnabled()
+
+
+def test_two_heads_into_one_channel_are_refused_with_a_warning(bench, monkeypatch):
+    window, calls = bench
+    warned = []
+    monkeypatch.setattr(jebao_gui.QMessageBox, "warning", lambda *a: warned.append(a[2]))
+    monkeypatch.setitem(
+        window.config.data, "guard", {**window.config.data.get("guard", {}), "one_per_channel": True}
+    )
+    tab = window.manual_tab
+    tab.clear_selection()
+    tile(window, "D1", 3).click()
+    tile(window, "D2", 3).click()  # the same channel: CH3 of the one stack
+    tab.btn_dispense.click()
+    assert calls == [] and "JP 1 · CH3 and JP 2 · CH3 both pump into CH3" in warned[0]
+    tab.clear_selection()
+    tile(window, "D1", 3).click()
+    tile(window, "D2", 4).click()  # different channels: fine
+    tab.btn_dispense.click()
+    assert calls[-1][0] == [("D1", 3), ("D2", 4)] and len(warned) == 1
+    tab.clear_selection()
 
 
 def test_offline_pump_tiles_are_disabled(bench):

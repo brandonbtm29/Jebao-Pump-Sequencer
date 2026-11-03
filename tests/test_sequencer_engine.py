@@ -93,7 +93,8 @@ def test_lanes_run_side_by_side_and_sync(pumps, qt_loop):
 def test_mixed_pumps_in_one_lane_run_together(pumps, qt_loop):
     window, sent, _ = pumps
     _, loop = qt_loop
-    assert run(loop, window, [dose([["A", 1], ["B", 1]], 0.2)]) == "done"
+    steps = [dose([["A", 1], ["B", 1]], 0.2)]  # both CH1: a sequence has to allow that (its checks)
+    assert run_checked(loop, window, steps, checks={"same_channel": "off"}) == "done"
     assert offs_and_ons(sent, "A", 1) == [True, False] and offs_and_ons(sent, "B", 1) == [True, False]
 
 
@@ -521,3 +522,128 @@ def test_tiles_and_names_show_ch5_to_8(stacks):
     tab = window.rack_tab
     tab.slot_clicked(next(s for s in tab.slots if s.did == "B"))
     assert [lbl.text() for lbl in tab.head_labels] == ["CH5:", "CH6:", "CH7:", "CH8:"]
+
+
+# --- one head at a time per channel ------------------------------------------------------------
+
+
+@pytest.fixture
+def guarded(window, monkeypatch):
+    """Pumps A (JP 1) and B (JP 2), not in the rack, so both are CH1–4: commands go through the
+    pump guard (it knows which heads are on), with a fake cloud underneath."""
+    window.cloud_devices = [
+        {"did": "A", "dev_alias": "JP 1", "is_online": True},
+        {"did": "B", "dev_alias": "JP 2", "is_online": True},
+    ]
+    for did in ("A", "B"):
+        window.config.get_pump(did)["calibration"] = [60.0] * 4
+        window.config.get_pump(did)["head_names"] = ["", "", "", ""]
+        window.config.get_pump(did)["display_name"] = ""
+    monkeypatch.setitem(window.config.data, "rack", {"stacks": []})
+    sent = []
+
+    async def fake_post(did, attrs):
+        sent.append((did, dict(attrs)))
+        return True
+
+    monkeypatch.setattr(window, "_post_control", fake_post)
+    return window, sent
+
+
+def run_checked(loop, window, steps, checks=None, during=None):
+    async def go():
+        window.seq_run = None
+        task = asyncio.ensure_future(
+            window._async_run_sequence("test", sq.to_saved_all(steps), checks=checks)
+        )
+        window.sequence_task = task
+        if during is not None:
+            await until(lambda: window.seq_run is not None)
+            await during(task)
+        return await task
+
+    return loop.run_until_complete(go())
+
+
+def test_two_heads_into_one_channel_stop_the_run(guarded, qt_loop):
+    window, sent = guarded
+    _, loop = qt_loop
+    assert window.channel_number("A", 1) == window.channel_number("B", 1) == 1
+    outcome = run_checked(loop, window, [dose([["A", 1], ["B", 1]], 1)])
+    assert outcome == "failed"
+    assert "is already pumping into CH1" in window.seq_run.why and "one head at a time" in window.seq_run.why
+    assert offs_and_ons(sent, "A", 1)[-1] is False or offs_and_ons(sent, "B", 1)[-1] is False
+    assert not any(on for on in window.guard.app_on.values())  # both are off
+
+
+def test_a_sequence_that_allows_it_runs_both(guarded, qt_loop, caplog):
+    window, sent = guarded
+    _, loop = qt_loop
+    assert (
+        run_checked(loop, window, [dose([["A", 1], ["B", 1]], 0.2)], checks={"same_channel": "off"}) == "done"
+    )
+    assert offs_and_ons(sent, "A", 1) == [True, False] and offs_and_ons(sent, "B", 1) == [True, False]
+    with caplog.at_level("WARNING", logger="JebaoGUI"):
+        assert (
+            run_checked(loop, window, [dose([["A", 2], ["B", 2]], 0.2)], checks={"same_channel": "warn"})
+            == "done"
+        )
+    assert "is pumping into CH2 too" in caplog.text
+
+
+def test_one_head_after_the_other_in_a_channel_is_fine(guarded, qt_loop):
+    window, sent = guarded
+    _, loop = qt_loop
+    assert run_checked(loop, window, [dose([["A", 1]], 0.2), dose([["B", 1]], 0.2)]) == "done"
+
+
+def test_a_manual_dose_in_the_channel_stops_a_sequence_head(guarded, qt_loop):
+    window, sent = guarded
+    _, loop = qt_loop
+
+    async def go():
+        manual = window.dispense([("A", 3)], 1.0, "time")
+        await until(lambda: ("A", 3) in window.head_runs)
+        window.seq_run = None
+        outcome = await window._async_run_sequence("test", sq.to_saved_all([dose([["B", 3]], 0.2)]))
+        await asyncio.gather(*manual)
+        return outcome
+
+    assert loop.run_until_complete(go()) == "failed"
+    assert "JP 1 · CH3 is already pumping into CH3" in window.seq_run.why
+    assert True not in offs_and_ons(sent, "B", 3)  # never turned on
+
+
+def test_the_manual_tab_skips_a_head_whose_channel_is_busy(guarded, qt_loop, caplog, monkeypatch):
+    window, sent = guarded
+    _, loop = qt_loop
+
+    async def go():
+        with caplog.at_level("WARNING", logger="JebaoGUI"):
+            tasks = window.dispense([("A", 1), ("B", 1), ("B", 2)], 0.2, "time")
+        await asyncio.gather(*tasks)
+
+    loop.run_until_complete(go())
+    assert offs_and_ons(sent, "A", 1) == [True, False] and offs_and_ons(sent, "B", 2) == [True, False]
+    assert offs_and_ons(sent, "B", 1) == []
+    assert "JP 2 · CH1 didn't start: JP 1 · CH1 is already pumping into CH1" in caplog.text
+    assert window._claims == set()
+    assert window.channel_problems([("A", 1), ("B", 1)]) == ["JP 1 · CH1 and JP 2 · CH1 both pump into CH1."]
+    monkeypatch.setitem(window.config.data, "guard", {"one_per_channel": False})
+    assert window.channel_problems([("A", 1), ("B", 1)]) == []
+    sent.clear()
+
+    async def both():
+        await asyncio.gather(*window.dispense([("A", 1), ("B", 1)], 0.2, "time"))
+
+    loop.run_until_complete(both())
+    assert offs_and_ons(sent, "B", 1) == [True, False]
+
+
+def test_queued_runs_keep_their_checks(guarded):
+    window, _ = guarded
+    window.queue_paused = True
+    assert window.enqueue("mix", [dose([["A", 1], ["B", 1]], 1)], checks={"same_channel": "off"})
+    assert window.sequence_queue[-1]["checks"]["same_channel"] == "off"
+    window.sequence_queue.clear()
+    window.queue_paused = False

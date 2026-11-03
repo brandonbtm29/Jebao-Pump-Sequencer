@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -543,9 +544,21 @@ class ManualTab(QWidget):
 
     def dispense(self):
         heads = sorted(self.selected)
-        if heads:
-            self.host.config.save()
-            self.host.dispense(heads, self.spin_amount.value(), self.unit())
+        if not heads:
+            return
+        problems = getattr(self.host, "channel_problems", lambda _h: [])(heads)
+        if problems:
+            QMessageBox.warning(
+                self,
+                "One head at a time per channel",
+                "Nothing was started:\n\n"
+                + "\n".join(f"• {p}" for p in problems)
+                + "\n\nOnly one head at a time may pump into a channel (Settings → Pump safety). "
+                "Pick one head per channel, or wait until the other one has finished.",
+            )
+            return
+        self.host.config.save()
+        self.host.dispense(heads, self.spin_amount.value(), self.unit())
 
     def _update_panel(self):
         host = self.host
