@@ -4,6 +4,20 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-11-02
+
+### Added
+- **Lab Manager, a Discord bot of your own, for fewer messages** (Settings → Discord → Notifications… → Lab Manager bot). It replaces the webhook's one message per event with:
+  - **One live card per run**, updated as the run goes: each channel's step, rests and time left. It has **Pause all / Resume all** and **Stop run** buttons (Stop asks you to confirm). When the run ends, the card shows how it went and what each head delivered. It is deleted after 7 days (adjustable, or never).
+  - **A short ping only when the run needs you**: a Wait for me step (with its message), a failed run, a head that can't be confirmed OFF, or a pump offline while in use. The ping is deleted once it's handled.
+  - **Continue from Discord**: a Wait for me step with **Allow Continue from Discord** ticked gets a Continue button for each waiting channel. It's off by default, for steps that need you at the bench.
+- Only the Discord users you list may press the buttons. Each press is checked against what the run is doing at that moment, and written in the System Log with the person's name.
+- After a crash, the next start deletes leftover pings and marks the unfinished run's card as closed.
+- The webhook still works as before, for anyone without a bot.
+
+### Security
+- The bot token is kept in `secrets.json`, never logged and left out of Copy Diagnostics. If two computers use the same bot, each one only answers its own buttons.
+
 ## [2.11.0] - 2026-11-02
 
 ### Added
@@ -322,7 +336,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...v2.9.0

@@ -111,14 +111,31 @@ This needs a copy made with `git clone` and Git installed. A ZIP download can't 
 
 Anyone who has the webhook URL can post in that channel, so treat it like a password. If it leaks, delete the webhook in Discord and make a new one. The app keeps it in `secrets.json`.
 
+### The Lab Manager bot: fewer messages, Continue from your phone
+
+A webhook can only post, one message per event. With a bot of your own, called Lab Manager here, the channel stays tidy:
+
+- **One live card per run.** It shows each channel's step, rests and time left, and it updates itself. It has **Pause all / Resume all** and **Stop run** buttons. Stop asks you to confirm. When the run ends, the card shows how it went and what each head delivered, and it stays in the channel for 7 days (adjustable).
+- **A short ping when the run needs you.** This covers a Wait for me step (with its message), a failed run, a head that can't be confirmed OFF, or a pump that goes offline while in use. The ping is deleted once it's handled. On a Wait for me step, **Continue CHn** buttons appear if you tick **Allow Continue from Discord** in that step. Leave it off for steps that need you at the bench.
+- **Only the people you list can press buttons.** Anyone else is told they can't. Every press is written in the System Log with the person's Discord name.
+
+To set it up:
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications), make an application (for example "Lab Manager"). Under **Bot**, turn off **Public Bot**.
+2. Invite the bot to your server with the **View Channels**, **Send Messages**, **Embed Links** and **Read Message History** permissions. If the channel is private, add the bot to it as well.
+3. Under **Bot**, press **Reset Token**, then **Copy**. In the app, open **Settings → Discord → Notifications…**, choose **Lab Manager bot** and paste the token. Then paste the channel's ID (right-click the channel → **Copy Channel ID**). Your own user ID goes under **Ping**, and under **May press buttons** if anyone else may too.
+4. Press **Send a test message**, then **OK**. The bot connects while the app is open.
+
+The bot token gives full control of the bot, so treat it like a password. If it leaks, press Reset Token in the Developer Portal and paste the new one. If two computers run the app with the same bot, each one handles only its own messages.
+
 ## Configuration
 
 The app keeps two settings files:
 
 | File | What's in it | Example |
 |---|---|---|
-| `secrets.json` | Your Jebao login and, if you use it, the Discord webhook URL | [`examples/secrets.example.json`](examples/secrets.example.json) |
-| `jebao_config.json` | Theme, whether to check for updates at start (`check_updates_on_start`), the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit and the Manual tab's one head per channel (`guard`), per-head limits (`pumps.<id>.limits`), Discord notifications (`discord`: on or off, events, pings, the ID to ping), Manual tab choices (tile size, last amount), the current sequence and saved sequences, and each one's checks (`sequence_checks`, `saved_sequence_checks`) | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
+| `secrets.json` | Your Jebao login and, if you use them, the Discord webhook URL and the Lab Manager bot token | [`examples/secrets.example.json`](examples/secrets.example.json) |
+| `jebao_config.json` | Theme, whether to check for updates at start (`check_updates_on_start`), the rack layout, pump and head names, calibrations and their dates, automatic-calibration settings (balance, port, volume, limits), the on-time limit and the Manual tab's one head per channel (`guard`), per-head limits (`pumps.<id>.limits`), Discord notifications (`discord`: on or off, webhook or bot, events, pings, the ID to ping, the bot's channel and who may press its buttons), Manual tab choices (tile size, last amount), the current sequence and saved sequences, and each one's checks (`sequence_checks`, `saved_sequence_checks`) | [`examples/jebao_config.example.json`](examples/jebao_config.example.json) |
 
 You don't need to write either file yourself. The app creates them when you save settings.
 
