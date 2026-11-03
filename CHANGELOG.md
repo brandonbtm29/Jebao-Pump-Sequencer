@@ -4,6 +4,20 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-11-02
+
+### Added
+- **Checks for each sequence** (Checks…, next to Preview timeline in the Sequencer). Each sequence keeps its own:
+  - **Two heads pumping into the same channel at once**, for example JP 1 · CH1 and JP 2 · CH1, both into column 1: Stop the run (the default), Warn or Allow. Stop marks it in Before you run, asks "Run anyway?", and stops the run if it happens anyway, say because of a dose started in the Manual tab.
+  - **A pump the sequence uses is offline**: Warn (as before) or Ask before running.
+  - **Calibration age**: how old a calibration may be (30 days by default), and whether an old or missing calibration warns, asks before running or isn't checked.
+  - The checks go with the sequence when you save, rename, duplicate, export or import it.
+- **The Manual tab starts one head at a time in each channel** (Settings → Pump safety, on by default). If two selected heads pump into the same channel, or another head is already pumping into it, nothing is started and the app says which heads clash.
+
+### Changed
+- **Wait for me no longer opens a pop-up.** The orange bar at the top shows the step's message, and the app's taskbar button flashes (on a Mac, its Dock icon bounces).
+- **A sequence that pumps two heads into one channel at once now asks before it runs, and stops when it gets there.** To run it that way on purpose, set its Checks… → Two heads pumping into the same channel to Allow.
+
 ## [2.10.0] - 2026-11-02
 
 ### Added
@@ -308,7 +322,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.7.0...v2.8.0
