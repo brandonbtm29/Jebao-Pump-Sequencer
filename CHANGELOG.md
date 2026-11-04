@@ -4,6 +4,11 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-11-04
+
+### Fixed
+- **Adding, duplicating or deleting a step no longer flashes small windows.** In the Sequencer, each of these briefly opened and closed several small windows (most visible on Windows), which made the change slow. The step settings on the right are now redrawn once per change instead of twice.
+
 ## [2.12.0] - 2026-11-02
 
 ### Added
@@ -336,7 +341,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...HEAD
+[2.12.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.9.0...v2.10.0
