@@ -190,11 +190,17 @@ def check_row(check):
 
 
 def clear_layout(layout):
+    """Take every widget out of ``layout`` and delete it.
+
+    Hidden first and left with its parent until it goes: a widget taken off its parent
+    (``setParent(None)``) becomes a window of its own, and Qt then shows it for a moment if it
+    had only just been added (its show was still queued), which flashed small windows on
+    Windows whenever the Sequencer redrew its step settings."""
     while layout.count():
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
-            w.setParent(None)
+            w.hide()
             w.deleteLater()
         elif item.layout() is not None:
             clear_layout(item.layout())
@@ -1046,11 +1052,11 @@ class SequencerTab(QWidget):
     def _changed(self, structure=False, select=None, inspector=False):
         """Something in the draft changed: save it soon, and work out the plan again."""
         if structure:
-            self._fill_steps(select=select)
+            self._fill_steps(select=select)  # (this redraws the step settings too)
         self._save_timer.start()
         self._plan_timer.start()
         self._update_bar()
-        if inspector:
+        if inspector and not structure:
             self._rebuild_inspector()
 
     def undo(self):
@@ -1692,6 +1698,14 @@ class SequencerTab(QWidget):
     # --- the inspector (the selected step's settings) ------------------------------------------
 
     def _rebuild_inspector(self):
+        """Redraw the step settings on the right, in one go (no flicker while it's rebuilt)."""
+        self.insp.setUpdatesEnabled(False)
+        try:
+            self._build_inspector()
+        finally:
+            self.insp.setUpdatesEnabled(True)
+
+    def _build_inspector(self):
         lay = self.insp_lay
         clear_layout(lay)
         self._chips = {}
@@ -2928,7 +2942,7 @@ class SequencerTab(QWidget):
         self._card_lanes = used
         for card in self.lane_cards.values():
             self.lane_grid.removeWidget(card)
-            card.setParent(None)
+            card.hide()  # (not setParent(None): see clear_layout)
             card.deleteLater()
         self.lane_cards = {ln: LaneCard(self, ln) for ln in used}
         for n, ln in enumerate(used):

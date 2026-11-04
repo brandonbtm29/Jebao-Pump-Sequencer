@@ -348,3 +348,45 @@ def test_a_two_heads_check_asks_before_running(tab, window, monkeypatch):
     assert window.sequence_queue[-1]["checks"]["same_channel"] == "warn"
     window.sequence_queue.clear()
     window.queue_paused = False
+
+
+def test_adding_duplicating_and_deleting_steps_opens_no_windows(tab, window, qt_loop):
+    """The step settings are redrawn without any widget becoming a window of its own for a
+    moment (that flashed small windows on Windows and made each change slow)."""
+    from PyQt6.QtCore import QEvent, QObject
+
+    app = qt_loop[0]
+    window.show()
+    window.tabs.setCurrentWidget(tab)
+    tab.show_page(0)
+    app.processEvents()
+    windows = []
+
+    class Watch(QObject):
+        def eventFilter(self, obj, event):
+            if (
+                event.type() == QEvent.Type.Show
+                and obj.isWidgetType()
+                and obj.isWindow()
+                and obj is not window
+            ):
+                windows.append(type(obj).__name__)
+            return False
+
+    watch = Watch()
+    app.installEventFilter(watch)
+    try:
+        for kind in ("dose", "review", "wait", "staccato"):
+            tab.add_step(kind)
+            app.processEvents()
+        tab.list.setCurrentRow(1)
+        app.processEvents()
+        tab.duplicate_steps()
+        app.processEvents()
+        tab.delete_steps()
+        app.processEvents()
+        tab.undo()
+        app.processEvents()
+    finally:
+        app.removeEventFilter(watch)
+    assert windows == []
