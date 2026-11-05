@@ -2,6 +2,7 @@
 background steps, the queue and the run history."""
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -645,5 +646,53 @@ def test_queued_runs_keep_their_checks(guarded):
     window.queue_paused = True
     assert window.enqueue("mix", [dose([["A", 1], ["B", 1]], 1)], checks={"same_channel": "off"})
     assert window.sequence_queue[-1]["checks"]["same_channel"] == "off"
+    window.sequence_queue.clear()
+    window.queue_paused = False
+
+
+# --- running only the channels that have samples ------------------------------------------------
+
+
+def test_a_run_on_some_channels_never_touches_the_others(pumps, qt_loop, tmp_path, monkeypatch, caplog):
+    window, sent, _ = pumps
+    _, loop = qt_loop
+    monkeypatch.setattr(window, "run_history_path", str(tmp_path / "runs.jsonl"))
+    steps = sq.to_saved_all(
+        [
+            dose([["A", 1], ["A", 2], ["A", 3]], 0.2),
+            {**sq.new_step("review", cols=[1, 2, 3]), "sound": False},
+            dose([["A", 2]], 0.2),  # only CH2: left out
+        ]
+    )
+
+    async def go():
+        window.seq_run = None
+        task = asyncio.ensure_future(window._async_run_sequence("SPE", steps, lanes=[1, 3]))
+        window.sequence_task = task
+        await until(lambda: window._ch_review_events.get(1) and window._ch_review_events.get(3))
+        assert not window._ch_review_events.get(2)
+        window.approve_all()
+        return await task
+
+    with caplog.at_level("INFO", logger="JebaoGUI"):
+        assert loop.run_until_complete(go()) == "done"
+    assert offs_and_ons(sent, "A", 1) == [True, False] and offs_and_ons(sent, "A", 3) == [True, False]
+    assert True not in offs_and_ons(sent, "A", 2)  # CH2 had no sample: never turned on
+    assert sorted(window.seq_run.lanes) == [1, 3]
+    assert "(CH2 left out: no samples)" in caplog.text
+    record = json.loads((tmp_path / "runs.jsonl").read_text().splitlines()[-1])
+    assert record["left_out"] == [2]
+
+
+def test_the_queue_keeps_the_channels_picked(pumps, qt_loop):
+    window, sent, _ = pumps
+    _, loop = qt_loop
+    window.queue_paused = True
+    assert window.enqueue("SPE", [dose([["A", 1], ["A", 2]], 0.2)], lanes=[2])
+    item = window.sequence_queue.pop()
+    assert item["lanes"] == [2]
+    loop.run_until_complete(window._run_queued(item))
+    assert offs_and_ons(sent, "A", 2) == [True, False] and True not in offs_and_ons(sent, "A", 1)
+    assert window.enqueue("SPE", [dose([["A", 1]], 0.2)]) and window.sequence_queue[-1]["lanes"] is None
     window.sequence_queue.clear()
     window.queue_paused = False

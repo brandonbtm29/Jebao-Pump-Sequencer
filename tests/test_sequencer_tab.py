@@ -21,7 +21,10 @@ def tab(window, monkeypatch):
         pump["calibrated_at"] = ["2026-10-29"] * 4
         pump["head_names"] = [f"EtOH → Col {c}" for c in range(1, 5)]
     window.config.data["saved_sequences"] = {}
+    window.config.data["sequence_skip_lanes"] = {}
     window.refresh_pumps()
+    # "Which channels have samples?" before a run: as if OK were pressed (every channel)
+    monkeypatch.setattr("sequencer_tab.ChannelsDialog.exec", lambda self: 1)
     t = window.sequencer_tab
     t._set_draft(UNTITLED, [], None)
     return t
@@ -390,3 +393,53 @@ def test_adding_duplicating_and_deleting_steps_opens_no_windows(tab, window, qt_
     finally:
         app.removeEventFilter(watch)
     assert windows == []
+
+
+def test_pick_the_channels_with_samples_before_a_run(tab, window, monkeypatch):
+    from sequencer_tab import ChannelsDialog
+
+    tab._set_draft(
+        "SPE", [{**sq.new_step("dose", heads=[["A", c] for c in (1, 2, 3, 4)]), "volume": 2}], None
+    )
+    shown = []
+
+    def untick_2_and_4(dlg):
+        shown.append(sorted(ln for ln, box in dlg.boxes.items() if box.isChecked()))
+        assert list(dlg.boxes) == [1, 2, 3, 4] and dlg.btn_go.text() == "Add to queue"
+        dlg.boxes[2].setChecked(False)
+        dlg.boxes[4].setChecked(False)
+        assert "CH1, 3: about 1 min" in dlg.summary.text() and "EtOH 4 mL" in dlg.summary.text()
+        return 1
+
+    monkeypatch.setattr(ChannelsDialog, "exec", untick_2_and_4)
+    window.queue_paused = True
+    tab.add_to_queue()
+    assert window.sequence_queue[-1]["lanes"] == [1, 3]
+    assert window.config.data["sequence_skip_lanes"]["SPE"] == [2, 4]
+    assert any("CH1, 3 only" in text for text, _i in tab._queue_rows())
+    # next time it starts from last time's choice
+    monkeypatch.setattr(ChannelsDialog, "exec", lambda dlg: shown.append(dlg.chosen()) or 1)
+    tab.add_to_queue()
+    assert shown[-1] == [1, 3] and window.sequence_queue[-1]["lanes"] == [1, 3]
+    # Cancel: nothing is queued
+    monkeypatch.setattr(ChannelsDialog, "exec", lambda dlg: 0)
+    tab.add_to_queue()
+    assert len(window.sequence_queue) == 2
+    window.sequence_queue.clear()
+    window.queue_paused = False
+
+
+def test_the_channel_picker_buttons_and_a_one_channel_sequence(tab, window, monkeypatch):
+    from sequencer_tab import ChannelsDialog
+
+    steps = [{**sq.new_step("dose", heads=[["A", 1], ["A", 2]]), "volume": 1}]
+    dlg = ChannelsDialog(window, "SPE", steps, sq.DEFAULT_CHECKS, [1, 2], skip=[2])
+    assert dlg.chosen() == [1] and dlg.lanes() == [1]
+    dlg._set_all(False)
+    assert not dlg.btn_go.isEnabled() and "at least one" in dlg.summary.text()
+    dlg._set_all(True)
+    assert dlg.btn_go.isEnabled() and dlg.lanes() is None  # all of them: nothing left out
+    asked = []
+    monkeypatch.setattr(ChannelsDialog, "exec", lambda d: asked.append(1) or 1)
+    one = [{**sq.new_step("dose", heads=[["A", 1]]), "volume": 1}]
+    assert tab.pick_channels("One", one, sq.DEFAULT_CHECKS, "Run now")[0] is None and asked == []

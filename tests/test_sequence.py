@@ -452,3 +452,40 @@ def test_offline_and_calibration_checks_follow_the_settings():
     assert levels(offline="stop", calibration_days=5) == {"offline": "error", "calibration": "warn"}
     assert levels(calibration="stop", calibration_days=5)["calibration"] == "error"
     assert "calibration" not in levels(calibration="off", calibration_days=5)
+
+
+# --- running only the channels that have samples ---------------------------------------------
+
+
+def test_a_run_on_some_channels_leaves_the_others_out_of_every_step():
+    c = two_stacks(rates={"A": 1.0, "B": 1.0})
+    every_a = [["A", ch] for ch in (1, 2, 3, 4)]
+    every_b = [["B", ch] for ch in (1, 2, 3, 4)]
+    steps = [
+        dose(every_a + every_b, ml=2),  # CH1–8
+        {**sq.new_step("review", cols=list(range(1, 9))), "sound": False},
+        dose([["A", 3]], ml=1),  # only CH3: left out entirely
+        sq.new_step("sync", cols=list(range(1, 9))),
+    ]
+    full = sq.plan(steps, c)
+    assert full.used_lanes == list(range(1, 9)) and full.left_out == []
+    p = sq.plan(steps, c, only=[1, 2, 5])
+    assert p.used_lanes == [1, 2, 5] and p.left_out == [3, 4, 6, 7, 8]
+    assert [(f.top, f.lanes) for f in p.flat] == [(0, (1, 2, 5)), (1, (1, 2, 5)), (3, (1, 2, 5))]
+    assert p.liquids == {"JP 1": pytest.approx(4.0), "JP 2": pytest.approx(2.0)}  # three heads, not eight
+    assert any(
+        c.level == "info" and "Left out of this run (no samples): CH3–4, 6–8." in c.text for c in p.checks
+    )
+    assert sorted(p.heads) == [("A", 1), ("A", 2), ("B", 1)]
+
+
+def test_older_steps_and_sub_sequences_follow_the_channels_picked():
+    elute = sq.to_saved_all([dose([["A", 1], ["A", 2], ["A", 3]], ml=1)])
+    steps = [
+        dose([["A", 1], ["A", 2], ["A", 3]], ml=1),
+        {**sq.new_step("review", lanes=[1, 2, 3]), "cols": None, "sound": False},  # 2.8: pump channels
+        {**sq.new_step("sequence", cols=[1, 2, 3]), "name": "Elute"},
+    ]
+    p = sq.plan(steps, ctx(rates={"A": 1.0}, saved={"Elute": elute}), only=[2])
+    assert [(f.path, f.lanes) for f in p.flat] == [((0,), (2,)), ((1,), (2,)), ((2, 0), (2,))]
+    assert p.total_s == pytest.approx(120)

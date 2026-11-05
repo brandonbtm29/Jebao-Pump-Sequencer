@@ -625,8 +625,9 @@ class Check:
     top: int | None = None
 
 
-def flatten(steps, ctx, name=None):
-    """Every step that will run, with sub-sequences opened up. Returns (flat, checks)."""
+def flatten(steps, ctx, name=None, only=None):
+    """Every step that will run, with sub-sequences opened up. Returns (flat, checks).
+    ``only``: run just these lanes (channels with samples); a step on none of them is left out."""
     out, checks = [], []
     if ctx.within is None:
         ctx = for_steps(ctx, steps, name)
@@ -635,7 +636,10 @@ def flatten(steps, ctx, name=None):
         for i, step in enumerate(items):
             p = path + (i,)
             where = f"Step {p[0] + 1}" + (f" (in “{via[-1]}”)" if via else "")
-            lanes = tuple(ln for ln in lanes_of(step, ctx) if allowed is None or ln in allowed)
+            full = lanes_of(step, ctx)
+            lanes = tuple(ln for ln in full if allowed is None or ln in allowed)
+            if allowed is not None and full and not lanes:
+                continue  # none of its channels run
             if step["kind"] == "sequence":
                 sub_name = step["name"]
                 sub = ctx.saved(sub_name) if sub_name else None
@@ -652,7 +656,7 @@ def flatten(steps, ctx, name=None):
                 continue
             out.append(Flat(p, step, lanes, via))
 
-    walk(normalize_all(steps), (), None, {name} if name else set(), ())
+    walk(normalize_all(steps), (), set(only) if only else None, {name} if name else set(), ())
     return out, checks
 
 
@@ -695,6 +699,7 @@ class Plan:
     checks: list = field(default_factory=list)
     flat: list = field(default_factory=list)
     used_lanes: list = field(default_factory=list)
+    left_out: list = field(default_factory=list)  # lanes the sequence uses that this run leaves out
     unknown: set = field(default_factory=set)  # tops whose time couldn't be worked out
     limit_cut: bool = False  # too long to count every on-time limit rest
 
@@ -799,14 +804,20 @@ def same_channel_overlaps(pumping):
     return found
 
 
-def plan(steps, ctx, name=None, with_limit=True, checks=None):
+def plan(steps, ctx, name=None, with_limit=True, checks=None, only=None):
     """Work out what a run of ``steps`` will do, without sending anything to the pumps.
-    ``checks`` are the sequence's checks (``checks_settings``)."""
+    ``checks`` are the sequence's checks (``checks_settings``); ``only`` the lanes to run
+    (None: all of them), for a run on just the channels that have samples."""
     steps = normalize_all(steps)
     checks = checks_settings(checks)
     p = Plan()
-    flat, p.checks = flatten(steps, ctx, name)
+    flat, p.checks = flatten(steps, ctx, name, only=only)
     p.flat = flat
+    if only:
+        every_flat, _ = flatten(steps, ctx, name)
+        p.left_out = sorted({ln for it in every_flat for ln in it.lanes} - set(only))
+        if p.left_out:
+            p.checks.append(Check("info", f"Left out of this run (no samples): {lanes_text(p.left_out)}."))
     budget = pumpguard.OnTimeBudget()
     off = pumpguard.Limit(enabled=False)
     every = sorted({ln for item in flat for ln in item.lanes})
@@ -1281,6 +1292,7 @@ class RunState:
             "skipped": sum(1 for s in self.cells.values() if s == SKIPPED),
             "cells": len(self.cells),
             "delivered": {k: round(v, 2) for k, v in self.delivered.items()},
+            "left_out": list(getattr(self.plan, "left_out", None) or []),
         }
 
 

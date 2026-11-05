@@ -2189,11 +2189,14 @@ class JebaoPumpGUI(QMainWindow):
             all_lanes=self.all_lanes,
         )
 
-    def plan_sequence(self, steps, name=None, with_limit=True, checks=None):
-        return sequence.plan(steps, self.plan_context(), name=name, with_limit=with_limit, checks=checks)
+    def plan_sequence(self, steps, name=None, with_limit=True, checks=None, only=None):
+        return sequence.plan(
+            steps, self.plan_context(), name=name, with_limit=with_limit, checks=checks, only=only
+        )
 
-    def enqueue(self, name, steps, front=False, checks=None):
-        """Add a sequence to the queue (``front``: next) with its checks. False if it has no steps."""
+    def enqueue(self, name, steps, front=False, checks=None, lanes=None):
+        """Add a sequence to the queue (``front``: next) with its checks and, if not all of
+        them, the channels to run (``lanes``). False if it has no steps."""
         steps = sequence.normalize_all(steps)
         if not steps:
             logger.warning("Nothing to run: the sequence has no steps.")
@@ -2202,6 +2205,7 @@ class JebaoPumpGUI(QMainWindow):
             "name": name or "Untitled sequence",
             "data": sequence.to_saved_all(steps),
             "checks": sequence.checks_settings(checks),
+            "lanes": sorted({int(ln) for ln in lanes}) if lanes else None,
         }
         if front:
             self.sequence_queue.insert(0, item)
@@ -2331,7 +2335,12 @@ class JebaoPumpGUI(QMainWindow):
         try:
             self.refresh_queue_ui()
             self.sequence_task = asyncio.create_task(
-                self._async_run_sequence(seq_name, seq_item.get("data") or [], checks=seq_item.get("checks"))
+                self._async_run_sequence(
+                    seq_name,
+                    seq_item.get("data") or [],
+                    checks=seq_item.get("checks"),
+                    lanes=seq_item.get("lanes"),
+                )
             )
             outcome = await self.sequence_task
         except asyncio.CancelledError:
@@ -2373,7 +2382,7 @@ class JebaoPumpGUI(QMainWindow):
         if tab is not None:
             tab.refresh_queue()
 
-    async def _async_run_sequence(self, seq_name, seq_data, call_stack=None, checks=None):
+    async def _async_run_sequence(self, seq_name, seq_data, call_stack=None, checks=None, lanes=None):
         """Run a sequence: each lane (CH1–CH4) goes through its own steps, side by side.
 
         Returns "done", "failed" (a step failed, e.g. a pump wouldn't turn on, and the rest
@@ -2383,7 +2392,7 @@ class JebaoPumpGUI(QMainWindow):
         """
         steps = sequence.normalize_all(seq_data)
         self._run_checks = sequence.checks_settings(checks)
-        plan = self.plan_sequence(steps, name=seq_name, checks=self._run_checks)
+        plan = self.plan_sequence(steps, name=seq_name, checks=self._run_checks, only=lanes)
         run = sequence.RunState(seq_name, steps, plan.flat, plan=plan)
         self.seq_run = run
         self._run_id = uuid.uuid4().hex[:10]
@@ -2393,7 +2402,10 @@ class JebaoPumpGUI(QMainWindow):
         # Which lane each head runs in, fixed for this run (moving pumps in the rack meanwhile
         # doesn't move their steps to other lanes halfway through)
         self._run_lane_of = {
-            key: self.channel_number(*key) for item in plan.flat for key in sequence.heads_of(item.step)
+            key: self.channel_number(*key)
+            for item in plan.flat
+            for key in sequence.heads_of(item.step)
+            if self.channel_number(*key) in item.lanes  # (not the heads of channels left out)
         }
         self._ch_running_tasks = {ch: [] for ch in lanes}
         self._ch_step_tasks = {}
@@ -2409,7 +2421,9 @@ class JebaoPumpGUI(QMainWindow):
                 logger.warning(f"[{seq_name}] {check.text}")
         logger.info(
             f"=== Starting “{seq_name}”: {len(steps)} step{'s' if len(steps) != 1 else ''} on "
-            f"{sequence.lanes_text(lanes)}, about {sequence.fmt_time(plan.total_s)} ==="
+            f"{sequence.lanes_text(lanes)}, about {sequence.fmt_time(plan.total_s)}"
+            + (f" ({sequence.lanes_text(plan.left_out)} left out: no samples)" if plan.left_out else "")
+            + " ==="
         )
         self._lane_tasks = {ch: asyncio.create_task(self._run_lane(ch, run)) for ch in lanes}
         outcome, why = "done", ""

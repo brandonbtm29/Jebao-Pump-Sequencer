@@ -23,6 +23,7 @@ front)``, ``run_active()``, ``stop_run()``, ``pause_lane(ch, paused)``, ``pause_
 """
 
 import copy
+import html
 import json
 import logging
 import os
@@ -773,6 +774,103 @@ class ChecksDialog(QDialog):
         out = {key: combo.currentData() for key, combo in self.combos.items()}
         out["calibration_days"] = self.spin_days.value()
         return sq.checks_settings(out)
+
+
+class ChannelsDialog(QDialog):
+    """Before a run: which channels have samples. Unticked ones are left out of every step for
+    this run (their doses, Wait for me and Sync steps); the sequence itself isn't changed."""
+
+    def __init__(self, host, name, steps, checks, used, skip=(), verb="Run now", parent=None):
+        super().__init__(parent)
+        self.host, self.name, self.steps, self.checks = host, name, steps, checks
+        self.used = list(used)
+        self.setWindowTitle(f"Channels · {name}")
+        self.setMinimumWidth(480)
+        lay = QVBoxLayout(self)
+        intro = QLabel(
+            f"<b>Which channels have samples?</b><br>“{html.escape(name)}” uses "
+            f"{sq.lanes_text(self.used)}. Untick the ones with nothing to run: they're left out of "
+            "every step this time. The sequence itself isn't changed."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        grid = QGridLayout()
+        self.boxes = {}
+        stacks = (host.rack_layout().get("stacks") or []) if hasattr(host, "rack_layout") else []
+        heads = {}  # lane -> the heads this sequence pumps there, for the tooltips
+        number = getattr(host, "channel_number", lambda _d, c: c)
+        for step in sq.normalize_all(steps):
+            for did, ch in sq.heads_of(step):
+                heads.setdefault(number(did, ch), {})[(did, ch)] = host.head_label(did, ch)
+        rows = {}
+        for lane in self.used:
+            index = (lane - 1) // rack.CHANNELS
+            rows.setdefault(index, []).append(lane)
+        for r, (index, lanes) in enumerate(sorted(rows.items())):
+            label = stacks[index].get("name") if index < len(stacks) else ""
+            grid.addWidget(grey(label or f"Stack {chr(65 + index)}", 12), r, 0)
+            for lane in lanes:
+                box = QCheckBox(f"CH{lane}")
+                box.setChecked(lane not in set(skip))
+                if heads.get(lane):
+                    box.setToolTip("\n".join(heads[lane].values()))
+                box.toggled.connect(self._update)
+                grid.addWidget(box, r, 1 + (lane - 1) % rack.CHANNELS)
+                self.boxes[lane] = box
+        grid.setColumnStretch(rack.CHANNELS + 1, 1)
+        lay.addLayout(grid)
+        quick = QHBoxLayout()
+        for text, on in (("All", True), ("None", False)):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _c=False, on=on: self._set_all(on))
+            quick.addWidget(b)
+        quick.addStretch(1)
+        lay.addLayout(quick)
+        self.summary = grey("", 12)
+        self.summary.setWordWrap(True)
+        lay.addWidget(self.summary)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.btn_go = self.buttons.addButton(verb, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.btn_go.setDefault(True)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        lay.addWidget(self.buttons)
+        self._update()
+
+    def _set_all(self, on):
+        for box in self.boxes.values():
+            box.blockSignals(True)
+            box.setChecked(on)
+            box.blockSignals(False)
+        self._update()
+
+    def chosen(self):
+        """The channels ticked, in order."""
+        return [ln for ln, box in self.boxes.items() if box.isChecked()]
+
+    def lanes(self):
+        """What to run: None for every channel, else the ticked ones."""
+        chosen = self.chosen()
+        return None if len(chosen) == len(self.used) else chosen
+
+    def _update(self, *_args):
+        chosen = self.chosen()
+        self.btn_go.setEnabled(bool(chosen))
+        if not chosen:
+            self.summary.setText("Tick at least one channel.")
+            return
+        try:
+            plan = self.host.plan_sequence(self.steps, name=self.name, checks=self.checks, only=self.lanes())
+        except Exception as e:  # the summary must never stop the run
+            self.summary.setText(f"({type(e).__name__} while working out the time.)")
+            return
+        parts = [f"{sq.lanes_text(chosen)}: about {sq.fmt_time(plan.total_s, approx=plan.rest_s > 0.5)}"]
+        if plan.liquids:
+            parts.append("liquid: " + sq.liquids_text(plan.liquids))
+        problems = len(plan.errors)
+        if problems:
+            parts.append(f"{problems} problem{'s' if problems != 1 else ''} (shown next)")
+        self.summary.setText(" · ".join(parts) + ".")
 
 
 class LaneCard(QFrame):
@@ -2290,9 +2388,9 @@ class SequencerTab(QWidget):
             QMessageBox.warning(self, "Rename sequence", f"There's already a sequence called “{new}”.")
             return
         lib[new] = lib.pop(old)
-        checks = self._checks_library()
-        if old in checks:
-            checks[new] = checks.pop(old)
+        for kept in (self._checks_library(), self._skip_library()):
+            if old in kept:
+                kept[new] = kept.pop(old)
         for steps in lib.values():  # sequences that run it keep working
             for s in steps:
                 if s.get("kind") == "sequence" and s.get("name") == old:
@@ -2324,6 +2422,7 @@ class SequencerTab(QWidget):
             return
         self._library().pop(name, None)
         self._checks_library().pop(name, None)
+        self._skip_library().pop(name, None)
         if self.source == name:
             self.source = None
         self.save_draft()
@@ -2410,21 +2509,59 @@ class SequencerTab(QWidget):
         )
         return reply == QMessageBox.StandardButton.Yes
 
+    def _skip_library(self):
+        """Per sequence, the channels left out last time (so the picker starts from them)."""
+        return self.host.config.data.setdefault("sequence_skip_lanes", {})
+
+    def pick_channels(self, name, steps, checks, verb):
+        """Ask which channels have samples. Returns (lanes, plan): lanes is None for all of them;
+        returns None if cancelled. A sequence on one channel isn't asked about."""
+        plan = self.host.plan_sequence(steps, name=name, checks=checks)
+        used = plan.used_lanes
+        if len(used) <= 1:
+            return None, plan
+        skip = [ln for ln in self._skip_library().get(name) or [] if ln in used]
+        dlg = ChannelsDialog(self.host, name, steps, checks, used, skip, verb, self)
+        if not dlg.exec():
+            return None
+        lanes = dlg.lanes()
+        self._skip_library()[name] = sorted(set(used) - set(dlg.chosen()))
+        self.host.config.save()
+        if lanes is None:
+            return None, plan
+        logger.info(f"“{name}”: running {sq.lanes_text(lanes)} only (no samples on the others).")
+        return lanes, self.host.plan_sequence(steps, name=name, checks=checks, only=lanes)
+
     def add_to_queue(self):
         self._replan()
-        if self.steps and self._ready_to_run(self.plan, self.name):
-            if self.host.enqueue(self.name, self.steps, checks=self.checks):
+        if not self.steps:
+            return
+        picked = self.pick_channels(self.name, self.steps, self.checks, "Add to queue")
+        if picked is None:
+            return
+        lanes, plan = picked
+        if self._ready_to_run(plan, self.name):
+            if self.host.enqueue(self.name, self.steps, checks=self.checks, lanes=lanes):
                 logger.info(f"“{self.name}” is in the queue (position {len(self.host.sequence_queue)}).")
 
     def _queue_saved(self, name):
         steps = self._library().get(name)
+        if not steps:
+            return
         checks = self.saved_checks(name)
-        if steps and self._ready_to_run(self.host.plan_sequence(steps, name=name, checks=checks), name):
-            self.host.enqueue(name, steps, checks=checks)
+        picked = self.pick_channels(name, steps, checks, "Add to queue")
+        if picked is not None and self._ready_to_run(picked[1], name):
+            self.host.enqueue(name, steps, checks=checks, lanes=picked[0])
 
     def run_now(self):
         self._replan()
-        if not self.steps or not self._ready_to_run(self.plan, self.name):
+        if not self.steps:
+            return
+        picked = self.pick_channels(self.name, self.steps, self.checks, "Run now")
+        if picked is None:
+            return
+        lanes, plan = picked
+        if not self._ready_to_run(plan, self.name):
             return
         busy = self.host.run_active()
         if busy:
@@ -2436,7 +2573,7 @@ class SequencerTab(QWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        if self.host.enqueue(self.name, self.steps, front=True, checks=self.checks):
+        if self.host.enqueue(self.name, self.steps, front=True, checks=self.checks, lanes=lanes):
             self.host.run_next_now()  # even if the queue is paused; the rest stay paused
             if not busy:
                 self.show_page(2)
@@ -2452,7 +2589,8 @@ class SequencerTab(QWidget):
             rows.append((f"▶ RUNNING · {host.current_running_sequence}{extra}", None))
         for i, q in enumerate(host.sequence_queue):
             steps = q.get("data") or []
-            rows.append((f"{i + 1}. {q.get('name', '?')} · {self._meta_for(steps)}", i))
+            only = f" · {sq.lanes_text(q['lanes'])} only" if q.get("lanes") else ""
+            rows.append((f"{i + 1}. {q.get('name', '?')} · {self._meta_for(steps)}{only}", i))
         return rows
 
     def refresh_queue(self):
