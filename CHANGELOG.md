@@ -4,6 +4,14 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-11-05
+
+### Added
+- **Run only the channels that have samples.** Run now and Add to queue (also Add to queue from the list of saved sequences) first ask "Which channels have samples?", with a tick box per channel grouped by stack.
+  - Untick the empty channels and they're left out of every step for that run, including their Wait for me and Sync steps. A step on none of the ticked channels is skipped. The sequence itself isn't changed.
+  - The picker starts from your last choice for that sequence. It shows the time and the liquid needed for the channels you picked, and the problems check only those.
+  - The queue, the start of the System Log and the run history say which channels were left out. A sequence that uses one channel doesn't ask.
+
 ## [2.12.1] - 2026-11-04
 
 ### Fixed
@@ -341,7 +349,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.0...HEAD
+[2.13.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.10.0...v2.11.0
