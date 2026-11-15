@@ -4,6 +4,12 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Changed
+- The data folder is now the app's own SyncThing folder, `~/SyncThing/Jebao Pump`, instead of
+  `Jebao Pump` inside the shared `~/SyncThing/UAkron Playground` folder (retired in November 2026).
+  A computer that has only the old folder keeps using it until SyncThing brings the new one.
+  `UAKRON_DATA_DIR` (the folder that holds the app's data folder) now defaults to `~/SyncThing`.
+
 ## [2.13.0] - 2026-11-05
 
 ### Added

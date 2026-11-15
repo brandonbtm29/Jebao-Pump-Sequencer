@@ -12,10 +12,24 @@ import sys
 # Override with UAKRON_APP_DATA_DIR (this app) or UAKRON_DATA_DIR (data root).
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.argv[0] = os.path.abspath(sys.argv[0])  # keeps "Restart" working after chdir
-DATA_DIR = os.environ.get("UAKRON_APP_DATA_DIR") or os.path.join(
-    os.environ.get("UAKRON_DATA_DIR")
-    or os.path.join(os.path.expanduser("~"), "SyncThing", "UAkron Playground"),
-    "Jebao Pump",
+DATA_FOLDER_NAME = "Jebao Pump"
+OLD_SYNC_FOLDER = "UAkron Playground"  # the SyncThing folder all the lab apps shared before Nov 2026
+
+
+def default_data_dir(home=None):
+    """``~/SyncThing/Jebao Pump``: the app's own SyncThing folder. A computer that doesn't have it
+    yet but still has the data in the old shared folder (``~/SyncThing/UAkron Playground/...``)
+    keeps using that one until SyncThing brings the new one."""
+    sync = os.path.join(home or os.path.expanduser("~"), "SyncThing")
+    new = os.path.join(sync, DATA_FOLDER_NAME)
+    old = os.path.join(sync, OLD_SYNC_FOLDER, DATA_FOLDER_NAME)
+    return old if not os.path.isdir(new) and os.path.isdir(old) else new
+
+
+DATA_DIR = os.environ.get("UAKRON_APP_DATA_DIR") or (
+    os.path.join(os.environ["UAKRON_DATA_DIR"], DATA_FOLDER_NAME)
+    if os.environ.get("UAKRON_DATA_DIR")
+    else default_data_dir()
 )
 os.makedirs(DATA_DIR, exist_ok=True)
 os.chdir(DATA_DIR)
