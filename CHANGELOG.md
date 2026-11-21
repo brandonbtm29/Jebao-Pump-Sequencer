@@ -4,6 +4,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-11-21
+
 ### Changed
 - The data folder is now the app's own SyncThing folder, `~/SyncThing/Jebao Pump`, instead of
   `Jebao Pump` inside the shared `~/SyncThing/UAkron Playground` folder (retired in November 2026).
@@ -355,7 +357,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.1...HEAD
+[2.13.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.11.0...v2.12.0
