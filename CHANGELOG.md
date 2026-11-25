@@ -4,6 +4,18 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-11-25
+
+### Security
+- **Updates install only signed releases.** The release's commit must be signed with one of the keys in
+  `.github/allowed_signers`, checked against the copy this computer already has, so a new release can't add
+  its own key. If it isn't, the update window says why (not signed, signed with a key that isn't listed, or
+  it couldn't be checked) and the app stays on the version it has. The check starts with this version: the
+  update *to* 2.14.0 is still installed the old way. It needs OpenSSH's `ssh-keygen`, which Windows 10/11,
+  macOS and Git for Windows include.
+- git and pip now run without any `GIT_*` settings from the environment (`GIT_CONFIG_*` can make git run
+  commands).
+
 ## [2.13.1] - 2026-11-21
 
 ### Changed
@@ -357,7 +369,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.1...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.1...v2.14.0
 [2.13.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.0...v2.12.1

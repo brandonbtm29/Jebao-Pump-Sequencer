@@ -96,6 +96,7 @@ Coming from 1.x? Your login, calibrations, pump order and saved sequences carry 
 Each time it starts, the app asks GitHub for the latest release (a normal web request; nothing about you or your pumps is sent). To turn that off, untick **Check for updates when the app starts** in **Settings → App**. If a newer one is out, the version in the bottom-right corner turns orange; nothing pops up. Click it, or open **Settings** and press **Check for Updates**, to read what changed and choose **Update and Restart**. The app:
 
 - only moves to published releases, never to unfinished work;
+- installs a release only if it's signed with one of the keys in `.github/allowed_signers`, checked against the copy you already have (so a new release can't add its own key). If it isn't, the app says why and stays on the version you have;
 - refuses if you changed any of the app's own files, so nothing of yours is overwritten;
 - reinstalls the dependencies only when the release changed them, and goes back to the old version if that fails;
 - won't update while a sequence is running or queued, or a dose or calibration is in progress. Restarting mid-dose could leave a pump running;

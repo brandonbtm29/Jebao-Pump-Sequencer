@@ -1,0 +1,10 @@
+# The keys this app trusts for updates. The Update button installs a release only if its commit is
+# signed with one of these (checked against this computer's own copy of this file, so a new commit can't
+# add a key for itself). To trust another key, add its line here in a commit signed with a key that's
+# already listed. Format (OpenSSH allowed signers): who  namespaces="git"  key
+# Main PC
+208085582+brandonbtm29@users.noreply.github.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDtVSZhkEfVylybiwxigOipgeHcFiD6qBU8UuH7CffbI
+# Laptop
+208085582+brandonbtm29@users.noreply.github.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB6SkYUXZ27E8lnETPeVXXSgzV/VZLgcoj6f4vLztNdz
+# Another PC
+208085582+brandonbtm29@users.noreply.github.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAhyAFT77zjA6QvKXPjwt+rwFjddDp9sKkbLYJ3b4vkg

@@ -11,6 +11,9 @@
 *.sh      text eol=lf
 *.py      text eol=lf
 
+# The updater reads this list of signing keys; keep it byte-for-byte
+.github/allowed_signers text eol=lf
+
 # Binary files
 *.png     binary
 *.jpg     binary
