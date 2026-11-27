@@ -4,6 +4,13 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-11-27
+
+### Fixed
+- **The update's signature check uses Git's own `ssh-keygen` first on Windows.** The one in Windows'
+  System32 folder can hang while checking a signature when the app runs in an SSH session (seen on BMAX);
+  Git's copy doesn't. Elsewhere, and on Windows computers without Git's copy, nothing changes.
+
 ## [2.14.0] - 2026-11-25
 
 ### Security
@@ -369,7 +376,8 @@ The working app before tracked releases.
 - Settings Folder option, so your login and pump settings can live in a synced folder and stay the same on every computer.
 - Double-click launchers for Windows and macOS.
 
-[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.14.0...HEAD
+[Unreleased]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.14.1...HEAD
+[2.14.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.14.0...v2.14.1
 [2.14.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.1...v2.14.0
 [2.13.1]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/brandonbtm29/Jebao-Pump-Sequencer/compare/v2.12.1...v2.13.0

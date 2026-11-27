@@ -313,6 +313,22 @@ def test_only_good_signatures_pass(tmp_path, monkeypatch, letter, code, words):
     assert updater.release_signed(str(tmp_path), "abc123") == ""
 
 
+def test_ssh_keygen_prefers_gits_copy_on_windows(tmp_path, monkeypatch):
+    """System32's ssh-keygen can hang on -Y verify in an SSH session (BMAX), so Git's own copy comes first."""
+    git = tmp_path / "Git" / "cmd" / "git.exe"
+    gits = tmp_path / "Git" / "usr" / "bin" / "ssh-keygen.exe"
+    on_path = tmp_path / "OpenSSH" / "ssh-keygen.exe"
+    for f in (git, gits, on_path):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(updater.shutil, "which", lambda name: str({"git": git, "ssh-keygen": on_path}[name]))
+    assert os.path.samefile(updater._ssh_keygen(windows=True), gits)
+    assert updater._ssh_keygen(windows=False) == str(on_path)  # elsewhere: the one on PATH
+    gits.unlink()
+    assert updater._ssh_keygen(windows=True) == str(on_path)
+
+
 def test_no_list_or_no_ssh_keygen_means_no_update(tmp_path, monkeypatch):
     def run(cmd, cwd, timeout=120):
         raise AssertionError("git shouldn't run")

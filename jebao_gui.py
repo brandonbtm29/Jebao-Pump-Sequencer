@@ -1,6 +1,6 @@
 """Jebao Pump Sequencer: PyQt6 app that drives Jebao dosing pumps through the Gizwits cloud API."""
 
-__version__ = "2.14.0"
+__version__ = "2.14.1"
 
 import os
 import sys

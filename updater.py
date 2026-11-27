@@ -225,20 +225,32 @@ SIGNATURE_STATUS = {  # git's %G? letters, for a commit that isn't signed by a t
 }
 
 
-def _ssh_keygen():
-    """OpenSSH's ssh-keygen, which checks SSH signatures (Windows has it in System32; Git bundles one too)."""
+def _ssh_keygen(windows=None):
+    """OpenSSH's ssh-keygen, which checks SSH signatures. On Windows, Git's own copy comes first: System32's can
+    hang on ``-Y verify`` when run in an SSH session (seen on BMAX, 2026-11-27)."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        roots = []
+        git = shutil.which("git")
+        if git:
+            # ...\Git\cmd\git.exe or ...\Git\mingw64\bin\git.exe: Git's folder is one or two levels up
+            folder = os.path.dirname(os.path.realpath(git))
+            for _ in range(3):
+                roots.append(folder)
+                folder = os.path.dirname(folder)
+        roots.append(os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git"))
+        for root in roots:
+            candidate = os.path.join(root, "usr", "bin", "ssh-keygen.exe")
+            if os.path.exists(candidate):
+                return candidate
     found = shutil.which("ssh-keygen")
     if found:
         return found
-    for candidate in (
-        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "OpenSSH", "ssh-keygen.exe"),
-        os.path.join(
-            os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "usr", "bin", "ssh-keygen.exe"
-        ),
-    ):
-        if os.path.exists(candidate):
-            return candidate
-    return None
+    system32 = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "OpenSSH", "ssh-keygen.exe"
+    )
+    return system32 if os.path.exists(system32) else None
 
 
 def release_signed(root, ref):
